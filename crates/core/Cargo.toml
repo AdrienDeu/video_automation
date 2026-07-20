@@ -1,0 +1,12 @@
+[package]
+name = "video_core"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+figment.workspace = true
+
+[dev-dependencies]
+serde_json = "1"

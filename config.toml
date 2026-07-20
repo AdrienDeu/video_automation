@@ -1,0 +1,6 @@
+data_dir = "data"
+server_addr = "127.0.0.1:8080"
+
+[llm]
+provider = "mistral"
+model = "mistral-large-latest"

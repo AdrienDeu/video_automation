@@ -1,0 +1,10 @@
+[package]
+name = "server"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+video_core.workspace = true
+axum.workspace = true
+tokio.workspace = true
+dotenvy.workspace = true

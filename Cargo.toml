@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/llm",
+    "crates/agents",
+    "crates/tools",
+    "crates/pipeline",
+    "apps/server",
+    "apps/cli",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+video_core = { path = "crates/core" }
+llm = { path = "crates/llm" }
+
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+thiserror = "2"
+figment = { version = "0.10", features = ["toml", "env"] }
+anyhow = "1"
+schemars = "0.8"
+dotenvy = "0.15"
+axum = "0.8"
+rig-core = "=0.40.0"

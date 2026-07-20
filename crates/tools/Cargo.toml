@@ -1,0 +1,7 @@
+[package]
+name = "tools"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+video_core.workspace = true

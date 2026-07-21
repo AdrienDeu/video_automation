@@ -8,3 +8,8 @@ model = "mistral-large-latest"
 [audio]
 # Duree maximale acceptee pour un audio envoye, en secondes (30 min).
 duree_max_secondes = 1800
+
+[pipeline]
+# Mode de la transition apres generation du scenario : "validation" (defaut,
+# relecture humaine) ou "auto".
+scenario = "validation"

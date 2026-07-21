@@ -14,6 +14,7 @@ use figment::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
+use crate::etat::ModeTransition;
 
 /// Configuration racine de l'application.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +28,9 @@ pub struct Config {
     /// Configuration de l'ingestion audio (phase 1).
     #[serde(default)]
     pub audio: AudioConfig,
+    /// Modes de transition du pipeline (phase 2).
+    #[serde(default)]
+    pub pipeline: PipelineConfig,
 }
 
 /// Configuration du fournisseur LLM.
@@ -65,6 +69,25 @@ impl Default for AudioConfig {
     }
 }
 
+/// Modes de transition du pipeline (voir `docs/architecture.md` §8).
+///
+/// Chaque etape sensible peut etre `auto` (le pipeline enchaine) ou
+/// `validation` (le pipeline bloque jusqu'a une decision via `POST /valider`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipelineConfig {
+    /// Mode de la transition qui suit la generation du scenario.
+    pub scenario: ModeTransition,
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        // Defaut prudent : le scenario est toujours relu par un humain.
+        Self {
+            scenario: ModeTransition::Validation,
+        }
+    }
+}
+
 impl Config {
     /// Valeurs par defaut, identiques au `config.toml` du depot.
     fn defaut() -> Self {
@@ -77,6 +100,7 @@ impl Config {
                 ollama_url: None,
             },
             audio: AudioConfig::default(),
+            pipeline: PipelineConfig::default(),
         }
     }
 
@@ -170,5 +194,30 @@ mod tests {
             .extract()
             .expect("le TOML avec [audio] doit etre valide");
         assert_eq!(config.audio.duree_max_secondes, 600);
+    }
+
+    #[test]
+    fn section_pipeline_optionnelle() {
+        // Sans section [pipeline] : validation du scenario par defaut.
+        let toml = r#"
+            data_dir = "data"
+            server_addr = "127.0.0.1:8080"
+
+            [llm]
+            provider = "mistral"
+            model = "mistral-large-latest"
+        "#;
+        let config: Config = Figment::from(Toml::string(toml))
+            .extract()
+            .expect("le TOML sans [pipeline] doit etre valide");
+        assert_eq!(config.pipeline, PipelineConfig::default());
+        assert_eq!(config.pipeline.scenario, ModeTransition::Validation);
+
+        // Avec une section [pipeline] explicite.
+        let toml = format!("{toml}\n[pipeline]\nscenario = \"auto\"\n");
+        let config: Config = Figment::from(Toml::string(&toml))
+            .extract()
+            .expect("le TOML avec [pipeline] doit etre valide");
+        assert_eq!(config.pipeline.scenario, ModeTransition::Auto);
     }
 }

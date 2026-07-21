@@ -8,3 +8,4 @@ pub mod config;
 pub mod error;
 pub mod etat;
 pub mod projet;
+pub mod scenario;

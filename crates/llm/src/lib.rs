@@ -5,3 +5,9 @@
 
 pub mod client;
 pub mod hello;
+pub mod scenariste;
+
+// Re-exports necessaires aux signatures des crates clients (agents, server) :
+// ils manipulent des extracteurs et des modeles sans dependre de rig-core.
+pub use rig_core::completion::CompletionModel;
+pub use rig_core::extractor::Extractor;

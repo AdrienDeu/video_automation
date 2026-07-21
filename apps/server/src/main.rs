@@ -1,8 +1,10 @@
 //! Serveur HTTP du projet (axum).
 //!
 //! Phase 1 : ingestion audio (`POST /audio`), transcription STT via Voxtral
-//! (API Mistral) et consultation d'un projet (`GET /projet/{id}`). Les
-//! endpoints de validation arrivent en phase 2.
+//! (API Mistral) et consultation d'un projet (`GET /projet/{id}`).
+//! Phase 2 : generation du scenario par l'agent Scenariste apres le STT,
+//! persistance SQLite (`pipeline::stockage`) et validation humaine du
+//! scenario (`POST /valider`).
 
 mod audio;
 mod handlers;
@@ -12,6 +14,7 @@ use std::sync::Arc;
 
 use axum::routing::{get, post};
 use axum::Router;
+use pipeline::stockage::Stockage;
 use video_core::config::{self, Config};
 use video_core::error::Error;
 
@@ -19,8 +22,11 @@ use video_core::error::Error;
 pub struct AppState {
     pub config: Config,
     /// Cle API Mistral capturee au demarrage ; `None` desactive la
-    /// transcription (l'audio est alors simplement stocke).
+    /// transcription et la generation de scenario (l'audio est alors
+    /// simplement stocke).
     pub cle_api: Option<String>,
+    /// Persistance SQLite des projets.
+    pub stockage: Stockage,
 }
 
 /// Construit le routeur de l'application (isole de `main` pour les tests).
@@ -29,6 +35,7 @@ fn construire_routeur(etat: Arc<AppState>) -> Router {
         .route("/health", get(|| async { "ok" }))
         .route("/audio", post(handlers::post_audio))
         .route("/projet/{id}", get(handlers::get_projet))
+        .route("/valider", post(handlers::post_valider))
         .with_state(etat)
 }
 
@@ -40,12 +47,14 @@ async fn main() -> Result<(), Error> {
     let config = Config::load()?;
     let adresse = config.server_addr.clone();
 
+    let stockage = Stockage::ouvrir(&config.data_dir).await?;
     let etat = Arc::new(AppState {
         cle_api: config::cle_api_mistral(),
         config,
+        stockage,
     });
     if etat.cle_api.is_none() {
-        eprintln!("attention : MISTRAL_API_KEY absente, la transcription est desactivee");
+        eprintln!("attention : MISTRAL_API_KEY absente, transcription et scenario sont desactives");
     }
 
     let app = construire_routeur(etat);

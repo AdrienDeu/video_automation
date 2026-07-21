@@ -5,7 +5,10 @@ license.workspace = true
 
 [dependencies]
 video_core.workspace = true
+agents.workspace = true
+llm.workspace = true
 tools.workspace = true
+pipeline.workspace = true
 axum = { workspace = true, features = ["multipart"] }
 tokio = { workspace = true, features = ["fs", "process"] }
 serde.workspace = true

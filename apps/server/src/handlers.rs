@@ -5,9 +5,10 @@ use std::sync::Arc;
 use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
 use axum::Json;
+use serde::Deserialize;
 use uuid::Uuid;
 use video_core::etat::EtatPipeline;
-use video_core::projet::Projet;
+use video_core::projet::{DecisionValidation, Projet};
 
 use crate::store;
 use crate::{audio, AppState};
@@ -29,13 +30,14 @@ fn erreur_interne(contexte: &str, e: impl std::fmt::Display) -> ErreurHttp {
 }
 
 /// `POST /audio` : recoit un fichier audio (multipart, champ `audio`, champ
-/// optionnel `langue`), le stocke dans `data/<id>/` puis le transcrit via
-/// l'API Mistral si `MISTRAL_API_KEY` est definie.
+/// optionnel `langue`), le stocke dans `data/<id>/` puis, si
+/// `MISTRAL_API_KEY` est definie, enchaine transcription STT (Voxtral) et
+/// generation du scenario (Scenariste).
 ///
 /// Sans cle API, l'audio est simplement stocke et le projet reste en etat
-/// `AudioRecu` (la transcription pourra etre relancee). En cas d'echec du
-/// STT, le projet est persiste en etat `Erreur` et renvoye avec un statut
-/// `502`.
+/// `AudioRecu`. Avec cle : le projet atteint `Transcrit`, puis
+/// `ScenarioGenere` ; en cas d'echec d'une de ces etapes, il est persiste en
+/// etat `Erreur` et renvoye avec un statut `502`.
 pub async fn post_audio(
     State(etat): State<Arc<AppState>>,
     mut multipart: Multipart,
@@ -135,11 +137,12 @@ pub async fn post_audio(
 
     let mut projet = Projet::nouveau(id);
     projet.audio = Some(nom_audio);
-    store::sauvegarder(&etat.config.data_dir, &projet)
+    etat.stockage
+        .sauvegarder(&projet)
         .await
         .map_err(|e| erreur_interne("persistance du projet", e))?;
 
-    // Sans cle API, l'audio est stocke et la transcription reste a faire.
+    // Sans cle API, l'audio est stocke et les etapes LLM restent a faire.
     let Some(cle) = &etat.cle_api else {
         return Ok((StatusCode::CREATED, Json(projet)));
     };
@@ -148,14 +151,39 @@ pub async fn post_audio(
         Ok(transcription) => {
             projet.transcription = Some(transcription);
             projet.etat = EtatPipeline::Transcrit;
-            store::sauvegarder(&etat.config.data_dir, &projet)
+            // Enchaine avec le Scenariste (phase 2) : la porte
+            // auto/validation est appliquee par le Realisateur.
+            let resultat =
+                llm::scenariste::construire_extracteur_scenario_depuis_config(&etat.config.llm);
+            let statut = match resultat {
+                Ok(extracteur) => match agents::realisateur::produire_scenario(
+                    &mut projet,
+                    &extracteur,
+                    etat.config.pipeline.scenario,
+                )
+                .await
+                {
+                    Ok(()) => StatusCode::CREATED,
+                    Err(erreur) => {
+                        projet.etat = EtatPipeline::Erreur(erreur.to_string());
+                        StatusCode::BAD_GATEWAY
+                    }
+                },
+                Err(erreur) => {
+                    projet.etat = EtatPipeline::Erreur(erreur.to_string());
+                    StatusCode::BAD_GATEWAY
+                }
+            };
+            etat.stockage
+                .sauvegarder(&projet)
                 .await
                 .map_err(|e| erreur_interne("persistance du projet", e))?;
-            Ok((StatusCode::CREATED, Json(projet)))
+            Ok((statut, Json(projet)))
         }
         Err(erreur) => {
             projet.etat = EtatPipeline::Erreur(erreur.to_string());
-            store::sauvegarder(&etat.config.data_dir, &projet)
+            etat.stockage
+                .sauvegarder(&projet)
                 .await
                 .map_err(|e| erreur_interne("persistance du projet", e))?;
             Ok((StatusCode::BAD_GATEWAY, Json(projet)))
@@ -163,8 +191,8 @@ pub async fn post_audio(
     }
 }
 
-/// `GET /projet/{id}` : renvoie l'etat d'un projet (et sa transcription une
-/// fois l'etape STT terminee).
+/// `GET /projet/{id}` : renvoie l'etat d'un projet (transcription, scenario,
+/// decision de validation... selon son avancement).
 pub async fn get_projet(
     State(etat): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -175,11 +203,56 @@ pub async fn get_projet(
             "identifiant de projet invalide".to_string(),
         ));
     }
-    match store::charger(&etat.config.data_dir, &id).await {
+    match etat.stockage.charger(&id).await {
         Ok(Some(projet)) => Ok(Json(projet)),
         Ok(None) => Err((StatusCode::NOT_FOUND, format!("projet inconnu : {id}"))),
         Err(e) => Err(erreur_interne("lecture du projet", e)),
     }
+}
+
+/// Corps de `POST /valider`.
+#[derive(Debug, Deserialize)]
+pub struct RequeteValidation {
+    /// Identifiant du projet a trancher.
+    pub id: String,
+    /// Decision prise sur le scenario (`accepte` ou `rejete`).
+    pub decision: DecisionValidation,
+}
+
+/// `POST /valider` : enregistre la decision humaine sur le scenario d'un
+/// projet en etat `ScenarioGenere`.
+///
+/// Renvoie `409` si le projet n'attend pas de decision (mauvais etat ou
+/// scenario deja tranche), `404` si le projet est inconnu.
+pub async fn post_valider(
+    State(etat): State<Arc<AppState>>,
+    Json(requete): Json<RequeteValidation>,
+) -> Result<Json<Projet>, ErreurHttp> {
+    if !store::id_valide(&requete.id) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "identifiant de projet invalide".to_string(),
+        ));
+    }
+    let mut projet = match etat.stockage.charger(&requete.id).await {
+        Ok(Some(projet)) => projet,
+        Ok(None) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("projet inconnu : {}", requete.id),
+            ))
+        }
+        Err(e) => return Err(erreur_interne("lecture du projet", e)),
+    };
+
+    pipeline::validation::appliquer_decision_scenario(&mut projet, requete.decision)
+        .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
+
+    etat.stockage
+        .sauvegarder(&projet)
+        .await
+        .map_err(|e| erreur_interne("persistance du projet", e))?;
+    Ok(Json(projet))
 }
 
 #[cfg(test)]
@@ -189,14 +262,19 @@ mod tests {
     use axum::http::Request;
     use axum::Router;
     use http_body_util::BodyExt;
+    use pipeline::stockage::Stockage;
     use tower::ServiceExt;
-    use video_core::config::{AudioConfig, Config, LlmConfig, Provider};
+    use video_core::config::{AudioConfig, Config, LlmConfig, PipelineConfig, Provider};
+    use video_core::scenario::{Scenario, Scene};
 
     use crate::construire_routeur;
 
     /// Construit l'application avec un dossier de donnees temporaire et sans
-    /// cle API (la transcription est alors desactivee).
-    fn app_de_test(data_dir: std::path::PathBuf) -> Router {
+    /// cle API (transcription et scenario sont alors desactives).
+    async fn app_de_test(data_dir: std::path::PathBuf) -> Router {
+        let stockage = Stockage::ouvrir(&data_dir)
+            .await
+            .expect("ouverture de la base de test");
         let config = Config {
             data_dir,
             server_addr: "127.0.0.1:0".to_string(),
@@ -206,10 +284,12 @@ mod tests {
                 ollama_url: None,
             },
             audio: AudioConfig::default(),
+            pipeline: PipelineConfig::default(),
         };
         construire_routeur(Arc::new(AppState {
             config,
             cle_api: None,
+            stockage,
         }))
     }
 
@@ -252,6 +332,16 @@ mod tests {
             .expect("construction de la requete")
     }
 
+    /// Construit une requete `POST /valider`.
+    fn requete_validation(id: &str, decision: &str) -> Request<Body> {
+        Request::post("/valider")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{ "id": "{id}", "decision": "{decision}" }}"#
+            )))
+            .expect("construction de la requete")
+    }
+
     /// Lit un corps de reponse JSON en `Projet`.
     async fn projet_depuis(reponse: axum::response::Response) -> Projet {
         let octets = reponse
@@ -263,10 +353,31 @@ mod tests {
         serde_json::from_slice(&octets).expect("corps JSON valide")
     }
 
+    /// Cree en base un projet en etat `ScenarioGenere`, pret a etre valide.
+    async fn semer_projet_scenario(app: &Router, data_dir: &std::path::Path) -> Projet {
+        let _ = app; // la graine passe par le stockage, pas par l'API
+        let stockage = Stockage::ouvrir(data_dir).await.expect("ouverture");
+        let mut projet = Projet::nouveau("projetscenario");
+        projet.etat = EtatPipeline::ScenarioGenere;
+        projet.scenario = Some(Scenario {
+            titre: "Sujet dicte".to_string(),
+            public: "tout public".to_string(),
+            style_images: "photos documentaires".to_string(),
+            scenes: vec![Scene {
+                narration: "Voici le sujet.".to_string(),
+                dialogues: vec![],
+                description_visuelle: "Une image d'illustration".to_string(),
+                duree_cible: 8.0,
+            }],
+        });
+        stockage.sauvegarder(&projet).await.expect("persistance");
+        projet
+    }
+
     #[tokio::test]
     async fn post_audio_puis_get_projet() {
         let temp = tempfile::tempdir().expect("dossier temporaire");
-        let app = app_de_test(temp.path().to_path_buf());
+        let app = app_de_test(temp.path().to_path_buf()).await;
 
         let reponse = app
             .clone()
@@ -278,7 +389,7 @@ mod tests {
         assert_eq!(projet.etat, EtatPipeline::AudioRecu);
         assert_eq!(projet.audio.as_deref(), Some("audio.wav"));
         assert!(temp.path().join(&projet.id).join("audio.wav").exists());
-        assert!(temp.path().join(&projet.id).join("projet.json").exists());
+        assert!(temp.path().join("pipeline.db").exists());
 
         let reponse = app
             .oneshot(
@@ -296,21 +407,27 @@ mod tests {
     #[tokio::test]
     async fn post_audio_refuse_un_format_inconnu() {
         let temp = tempfile::tempdir().expect("dossier temporaire");
-        let app = app_de_test(temp.path().to_path_buf());
+        let app = app_de_test(temp.path().to_path_buf()).await;
 
         let reponse = app
             .oneshot(requete_audio("notes.txt", b"du texte"))
             .await
             .expect("reponse");
         assert_eq!(reponse.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
-        // Rien n'a ete persiste.
-        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+        // Aucun dossier de projet n'a ete cree.
+        assert_eq!(
+            std::fs::read_dir(temp.path())
+                .unwrap()
+                .filter(|e| e.as_ref().unwrap().path().is_dir())
+                .count(),
+            0
+        );
     }
 
     #[tokio::test]
     async fn get_projet_inconnu_renvoie_404() {
         let temp = tempfile::tempdir().expect("dossier temporaire");
-        let app = app_de_test(temp.path().to_path_buf());
+        let app = app_de_test(temp.path().to_path_buf()).await;
 
         let reponse = app
             .oneshot(
@@ -326,7 +443,7 @@ mod tests {
     #[tokio::test]
     async fn get_projet_refuse_un_id_invalide() {
         let temp = tempfile::tempdir().expect("dossier temporaire");
-        let app = app_de_test(temp.path().to_path_buf());
+        let app = app_de_test(temp.path().to_path_buf()).await;
 
         let reponse = app
             .oneshot(
@@ -337,5 +454,91 @@ mod tests {
             .await
             .expect("reponse");
         assert_eq!(reponse.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn post_valider_accepte_le_scenario() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+        semer_projet_scenario(&app, temp.path()).await;
+
+        let reponse = app
+            .oneshot(requete_validation("projetscenario", "accepte"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::OK);
+        let projet = projet_depuis(reponse).await;
+        assert_eq!(
+            projet.validation_scenario,
+            Some(DecisionValidation::Accepte)
+        );
+        assert_eq!(projet.etat, EtatPipeline::ScenarioGenere);
+    }
+
+    #[tokio::test]
+    async fn post_valider_rejette_le_scenario() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+        semer_projet_scenario(&app, temp.path()).await;
+
+        let reponse = app
+            .oneshot(requete_validation("projetscenario", "rejete"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::OK);
+        let projet = projet_depuis(reponse).await;
+        assert_eq!(projet.validation_scenario, Some(DecisionValidation::Rejete));
+    }
+
+    #[tokio::test]
+    async fn post_valider_bloque_une_seconde_decision() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+        semer_projet_scenario(&app, temp.path()).await;
+
+        let reponse = app
+            .clone()
+            .oneshot(requete_validation("projetscenario", "accepte"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::OK);
+
+        let reponse = app
+            .oneshot(requete_validation("projetscenario", "rejete"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn post_valider_refuse_un_projet_sans_scenario() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+
+        // Projet cree par upload d'audio : etat AudioRecu, pas de scenario.
+        let reponse = app
+            .clone()
+            .oneshot(requete_audio("note.wav", &wav_silence(200)))
+            .await
+            .expect("reponse");
+        let projet = projet_depuis(reponse).await;
+
+        let reponse = app
+            .oneshot(requete_validation(&projet.id, "accepte"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn post_valider_projet_inconnu_renvoie_404() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+
+        let reponse = app
+            .oneshot(requete_validation("inconnu123", "accepte"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::NOT_FOUND);
     }
 }

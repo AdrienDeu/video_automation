@@ -1,11 +1,12 @@
-//! Types d'un projet video : fichier audio dicte, transcription, etat.
+//! Types d'un projet video : fichier audio dicte, transcription, scenario.
 //!
-//! Un projet est persiste en JSON dans `data/<id>/projet.json` (MVP de la
-//! phase 1 ; SQLite arrive avec la machine a etats en phase 2).
+//! Un projet est persiste dans la base SQLite `data/pipeline.db` (phase 2) ;
+//! ses fichiers (audio, images, voix...) vivent dans `data/<id>/`.
 
 use serde::{Deserialize, Serialize};
 
 use crate::etat::EtatPipeline;
+use crate::scenario::Scenario;
 
 /// Un projet video, de l'audio dicte a la publication.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -18,6 +19,22 @@ pub struct Projet {
     pub audio: Option<String>,
     /// Transcription STT, presente une fois l'etat `Transcrit` atteint.
     pub transcription: Option<Transcription>,
+    /// Scenario genere par le Scenariste, present une fois l'etat
+    /// `ScenarioGenere` atteint.
+    pub scenario: Option<Scenario>,
+    /// Decision de validation humaine du scenario (`None` tant que la
+    /// transition sortante, en mode `validation`, n'a pas ete tranchee).
+    pub validation_scenario: Option<DecisionValidation>,
+}
+
+/// Decision prise par l'utilisateur sur une etape en mode `validation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionValidation {
+    /// L'etape est acceptee, le pipeline peut avancer.
+    Accepte,
+    /// L'etape est refusee ; le resultat devra etre affine ou regenere.
+    Rejete,
 }
 
 impl Projet {
@@ -28,6 +45,8 @@ impl Projet {
             etat: EtatPipeline::AudioRecu,
             audio: None,
             transcription: None,
+            scenario: None,
+            validation_scenario: None,
         }
     }
 }

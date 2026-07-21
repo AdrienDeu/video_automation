@@ -23,9 +23,13 @@ pub enum Error {
     #[error("erreur outil : {0}")]
     Tool(String),
 
-    /// Erreur de persistance de l'etat d'un projet (JSON sur disque).
+    /// Erreur de persistance de l'etat d'un projet (SQLite).
     #[error("erreur de persistance : {0}")]
     Persistance(String),
+
+    /// Erreur de logique du pipeline (transition invalide, etape absente).
+    #[error("erreur de pipeline : {0}")]
+    Pipeline(String),
 }
 
 impl Error {

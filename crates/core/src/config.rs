@@ -24,6 +24,9 @@ pub struct Config {
     pub server_addr: String,
     /// Configuration du fournisseur LLM.
     pub llm: LlmConfig,
+    /// Configuration de l'ingestion audio (phase 1).
+    #[serde(default)]
+    pub audio: AudioConfig,
 }
 
 /// Configuration du fournisseur LLM.
@@ -47,6 +50,21 @@ pub enum Provider {
     Ollama,
 }
 
+/// Configuration de l'ingestion audio (`POST /audio`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioConfig {
+    /// Duree maximale acceptee pour un audio envoye, en secondes.
+    pub duree_max_secondes: u64,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            duree_max_secondes: 1800,
+        }
+    }
+}
+
 impl Config {
     /// Valeurs par defaut, identiques au `config.toml` du depot.
     fn defaut() -> Self {
@@ -58,6 +76,7 @@ impl Config {
                 model: "mistral-large-latest".to_string(),
                 ollama_url: None,
             },
+            audio: AudioConfig::default(),
         }
     }
 
@@ -127,5 +146,29 @@ mod tests {
             config.llm.ollama_url.as_deref(),
             Some("http://127.0.0.1:11434")
         );
+    }
+
+    #[test]
+    fn section_audio_optionnelle() {
+        // Sans section [audio] : les valeurs par defaut s'appliquent.
+        let toml = r#"
+            data_dir = "data"
+            server_addr = "127.0.0.1:8080"
+
+            [llm]
+            provider = "mistral"
+            model = "mistral-large-latest"
+        "#;
+        let config: Config = Figment::from(Toml::string(toml))
+            .extract()
+            .expect("le TOML sans [audio] doit etre valide");
+        assert_eq!(config.audio, AudioConfig::default());
+
+        // Avec une section [audio] explicite.
+        let toml = format!("{toml}\n[audio]\nduree_max_secondes = 600\n");
+        let config: Config = Figment::from(Toml::string(&toml))
+            .extract()
+            .expect("le TOML avec [audio] doit etre valide");
+        assert_eq!(config.audio.duree_max_secondes, 600);
     }
 }

@@ -22,6 +22,10 @@ pub enum Error {
     /// Erreur remontee par un outil (tool calling).
     #[error("erreur outil : {0}")]
     Tool(String),
+
+    /// Erreur de persistance de l'etat d'un projet (JSON sur disque).
+    #[error("erreur de persistance : {0}")]
+    Persistance(String),
 }
 
 impl Error {

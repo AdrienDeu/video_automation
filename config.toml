@@ -4,3 +4,7 @@ server_addr = "127.0.0.1:8080"
 [llm]
 provider = "mistral"
 model = "mistral-large-latest"
+
+[audio]
+# Duree maximale acceptee pour un audio envoye, en secondes (30 min).
+duree_max_secondes = 1800

@@ -1,6 +1,8 @@
 //! Outils LLM exposes aux agents (`choisir_image`, `ffmpeg`, `transcrire_audio`,
 //! `generer_voix`, `publier_youtube`, `demander_validation`).
 //!
-//! Implementes a partir de la phase 1 (voir `docs/agenda.md`) : en phase 0 ce
-//! crate ne contient volontairement aucun code. L'outil factice de
-//! demonstration vit dans le crate `llm`.
+//! Phase 1 : seul `transcrire_audio` est implemente (voir `docs/agenda.md`).
+//! Les outils sont de simples fonctions testables independamment du LLM ; leur
+//! declaration a rig arrive avec les agents (phase 2).
+
+pub mod transcrire;

@@ -65,7 +65,52 @@ impl Stockage {
         .execute(&self.pool)
         .await
         .map_err(erreur_sql)?;
+        // Compteur d'uploads YouTube par jour (garde-fou quota, phase 6) :
+        // la date UTC du jour sert de cle, le compteur repart donc de zero
+        // chaque jour.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS quota_uploads (
+                jour    TEXT PRIMARY KEY,
+                uploads INTEGER NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(erreur_sql)?;
         Ok(())
+    }
+
+    /// Nombre d'uploads YouTube comptabilises pour le jour courant (UTC).
+    pub async fn uploads_du_jour(&self) -> Result<u32, Error> {
+        let ligne = sqlx::query("SELECT uploads FROM quota_uploads WHERE jour = date('now')")
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(erreur_sql)?;
+        match ligne {
+            Some(ligne) => {
+                let uploads: i64 = ligne
+                    .try_get("uploads")
+                    .map_err(|e| Error::Persistance(e.to_string()))?;
+                Ok(uploads.max(0) as u32)
+            }
+            None => Ok(0),
+        }
+    }
+
+    /// Comptabilise un upload YouTube et renvoie le nouveau total du jour.
+    pub async fn incrementer_uploads(&self) -> Result<u32, Error> {
+        let ligne = sqlx::query(
+            "INSERT INTO quota_uploads (jour, uploads) VALUES (date('now'), 1)
+             ON CONFLICT (jour) DO UPDATE SET uploads = uploads + 1
+             RETURNING uploads",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(erreur_sql)?;
+        let uploads: i64 = ligne
+            .try_get("uploads")
+            .map_err(|e| Error::Persistance(e.to_string()))?;
+        Ok(uploads.max(0) as u32)
     }
 
     /// Insere ou remplace l'etat d'un projet.
@@ -222,5 +267,41 @@ mod tests {
         assert_eq!(resumes[0].etat, "erreur");
         assert_eq!(resumes[1].id, "ancien");
         assert_eq!(resumes[1].etat, "audio_recu");
+    }
+
+    #[tokio::test]
+    async fn compte_les_uploads_du_jour() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let stockage = Stockage::ouvrir(temp.path()).await.expect("ouverture");
+
+        assert_eq!(stockage.uploads_du_jour().await.expect("compteur"), 0);
+        assert_eq!(stockage.incrementer_uploads().await.expect("increment"), 1);
+        assert_eq!(stockage.incrementer_uploads().await.expect("increment"), 2);
+        assert_eq!(stockage.uploads_du_jour().await.expect("compteur"), 2);
+    }
+
+    #[tokio::test]
+    async fn le_compteur_repart_a_zero_chaque_jour() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let stockage = Stockage::ouvrir(temp.path()).await.expect("ouverture");
+
+        // Un compteur eleve date d'hier : il ne doit pas compter pour
+        // aujourd'hui.
+        sqlx::query("INSERT INTO quota_uploads (jour, uploads) VALUES (date('now', '-1 day'), 42)")
+            .execute(&stockage.pool)
+            .await
+            .expect("insertion d'un compteur ancien");
+        assert_eq!(stockage.uploads_du_jour().await.expect("compteur"), 0);
+        assert_eq!(stockage.incrementer_uploads().await.expect("increment"), 1);
+
+        // Le compteur d'hier est conserve tel quel.
+        let hier: i64 =
+            sqlx::query("SELECT uploads FROM quota_uploads WHERE jour = date('now', '-1 day')")
+                .fetch_one(&stockage.pool)
+                .await
+                .expect("lecture du compteur ancien")
+                .try_get("uploads")
+                .expect("colonne uploads");
+        assert_eq!(hier, 42);
     }
 }

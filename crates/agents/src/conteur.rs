@@ -153,7 +153,9 @@ fn ecrire_srt(dossier: &Path, nom: &str, contenu: &str) -> Result<(), Error> {
 mod tests {
     use super::*;
 
-    use video_core::config::{AudioConfig, LlmConfig, PipelineConfig, Provider, VoixConfig};
+    use video_core::config::{
+        AudioConfig, LlmConfig, PipelineConfig, Provider, VoixConfig, YoutubeConfig,
+    };
     use video_core::projet::{Segment, Transcription};
     use video_core::scenario::Scenario;
 
@@ -178,6 +180,7 @@ mod tests {
                 modele: "voxtral-mini-tts".to_string(),
                 voix: "default".to_string(),
             },
+            youtube: YoutubeConfig::default(),
         }
     }
 

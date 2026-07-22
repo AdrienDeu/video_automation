@@ -8,8 +8,15 @@
 </head>
 <body>
   <header>
-    <h1>Studio video</h1>
-    <p class="sous-titre">De la dictee a la video educative</p>
+    <div class="header-contenu">
+      <div class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M8 5.5v13a1 1 0 0 0 1.53.85l10.2-6.5a1 1 0 0 0 0-1.7L9.53 4.65A1 1 0 0 0 8 5.5z"/></svg>
+      </div>
+      <div>
+        <h1>Studio video</h1>
+        <p class="sous-titre">De la dictee a la video educative</p>
+      </div>
+    </div>
   </header>
   <main>
     <section id="zone-upload" class="carte">
@@ -36,12 +43,14 @@
 
     <section id="zone-detail" class="carte" hidden>
       <h2 id="detail-titre">Detail du projet</h2>
+      <div id="detail-etapes"></div>
       <div id="detail-etat"></div>
       <div id="detail-transcription"></div>
       <div id="detail-scenario"></div>
       <div id="detail-visuels"></div>
       <div id="detail-voix"></div>
       <div id="detail-montage"></div>
+      <div id="detail-publication"></div>
       <div id="detail-validation"></div>
     </section>
   </main>

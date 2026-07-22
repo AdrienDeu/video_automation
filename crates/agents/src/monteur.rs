@@ -113,7 +113,9 @@ mod tests {
     use std::path::Path;
 
     use video_core::asset::{Asset, SourceImage};
-    use video_core::config::{AudioConfig, LlmConfig, PipelineConfig, Provider, VoixConfig};
+    use video_core::config::{
+        AudioConfig, LlmConfig, PipelineConfig, Provider, VoixConfig, YoutubeConfig,
+    };
     use video_core::scenario::{Scenario, Scene};
     use video_core::voix::VoixScene;
 
@@ -138,6 +140,7 @@ mod tests {
             audio: AudioConfig::default(),
             pipeline: PipelineConfig::default(),
             voix: VoixConfig::default(),
+            youtube: YoutubeConfig::default(),
         }
     }
 

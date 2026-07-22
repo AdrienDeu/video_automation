@@ -26,3 +26,16 @@ montage = "validation"
 url = "https://api.mistral.ai/v1/audio/speech"
 modele = "voxtral-mini-tts"
 voix = "default"
+
+[youtube]
+# Visibilite des videos publiees : "private" (defaut prudent), "unlisted"
+# ou "public". Le passage en "public" reste une decision explicite.
+visibilite = "private"
+# Tags ajoutes a chaque video publiee.
+tags = []
+# Nombre maximal d'uploads par jour : garde-fou sous le quota API
+# (10 000 unites/jour, un upload = 1 600 unites, soit ~6 videos/jour).
+quota_uploads_jour = 6
+# Aucun secret ici : YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET passent par
+# l'environnement, le refresh token par `cli youtube-auth`
+# (data/youtube_token.json) ou YOUTUBE_REFRESH_TOKEN.

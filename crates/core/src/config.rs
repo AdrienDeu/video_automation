@@ -34,6 +34,9 @@ pub struct Config {
     /// Configuration du TTS (phase 4).
     #[serde(default)]
     pub voix: VoixConfig,
+    /// Configuration de la publication YouTube (phase 6).
+    #[serde(default)]
+    pub youtube: YoutubeConfig,
 }
 
 /// Configuration du fournisseur LLM.
@@ -98,6 +101,35 @@ impl Default for VoixConfig {
     }
 }
 
+/// Configuration de la publication YouTube (outil `publier_youtube`, phase 6).
+///
+/// Aucun secret ici : les identifiants OAuth (client ID/secret, refresh
+/// token) passent par l'environnement ou par `data/youtube_token.json`
+/// (voir [`secrets_youtube`]), jamais par `config.toml`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct YoutubeConfig {
+    /// Visibilite des videos publiees : `private` (defaut prudent),
+    /// `unlisted` ou `public`.
+    pub visibilite: String,
+    /// Tags ajoutes a chaque video publiee.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Nombre maximal d'uploads autorises par jour (garde-fou quota : le
+    /// quota API par defaut est de 10 000 unites/jour, un upload coute
+    /// 1 600 unites, soit ~6 videos/jour).
+    pub quota_uploads_jour: u32,
+}
+
+impl Default for YoutubeConfig {
+    fn default() -> Self {
+        Self {
+            visibilite: "private".to_string(),
+            tags: Vec::new(),
+            quota_uploads_jour: 6,
+        }
+    }
+}
+
 /// Modes de transition du pipeline (voir `docs/architecture.md` §8).
 ///
 /// Chaque etape sensible peut etre `auto` (le pipeline enchaine) ou
@@ -145,6 +177,7 @@ impl Config {
             audio: AudioConfig::default(),
             pipeline: PipelineConfig::default(),
             voix: VoixConfig::default(),
+            youtube: YoutubeConfig::default(),
         }
     }
 
@@ -168,6 +201,48 @@ pub fn cle_api_mistral() -> Option<String> {
     std::env::var("MISTRAL_API_KEY")
         .ok()
         .filter(|v| !v.is_empty())
+}
+
+/// Nom du fichier de jeton OAuth YouTube dans le dossier de donnees (ecrit
+/// par `cli youtube-auth`, jamais commite : `data/` est gitignore).
+pub const FICHIER_JETON_YOUTUBE: &str = "youtube_token.json";
+
+/// Identifiants OAuth YouTube necessaires a la publication (phase 6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretsYoutube {
+    /// Client ID de l'application Google (variable `YOUTUBE_CLIENT_ID`).
+    pub client_id: String,
+    /// Client secret de l'application Google (variable `YOUTUBE_CLIENT_SECRET`).
+    pub client_secret: String,
+    /// Refresh token obtenu via `cli youtube-auth`.
+    pub refresh_token: String,
+}
+
+/// Resout les identifiants OAuth YouTube.
+///
+/// Le client ID et le client secret viennent des variables
+/// `YOUTUBE_CLIENT_ID` / `YOUTUBE_CLIENT_SECRET`. Le refresh token vient de
+/// `YOUTUBE_REFRESH_TOKEN` si definie, sinon du fichier
+/// `<data_dir>/youtube_token.json` ecrit par `cli youtube-auth`. Retourne
+/// `None` si l'un des trois manque : la publication est alors desactivee.
+pub fn secrets_youtube(data_dir: &std::path::Path) -> Option<SecretsYoutube> {
+    let variable = |nom: &str| std::env::var(nom).ok().filter(|v| !v.is_empty());
+    let client_id = variable("YOUTUBE_CLIENT_ID")?;
+    let client_secret = variable("YOUTUBE_CLIENT_SECRET")?;
+    let refresh_token = variable("YOUTUBE_REFRESH_TOKEN").or_else(|| {
+        let contenu = std::fs::read_to_string(data_dir.join(FICHIER_JETON_YOUTUBE)).ok()?;
+        serde_json::from_str::<serde_json::Value>(&contenu)
+            .ok()?
+            .get("refresh_token")?
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    })?;
+    Some(SecretsYoutube {
+        client_id,
+        client_secret,
+        refresh_token,
+    })
 }
 
 #[cfg(test)]
@@ -266,6 +341,36 @@ mod tests {
             .expect("le TOML avec [pipeline] doit etre valide");
         assert_eq!(config.pipeline.scenario, ModeTransition::Auto);
         assert_eq!(config.pipeline.montage, ModeTransition::Auto);
+    }
+
+    #[test]
+    fn section_youtube_optionnelle() {
+        // Sans section [youtube] : visibilite private et quota de 6 uploads.
+        let toml = r#"
+            data_dir = "data"
+            server_addr = "127.0.0.1:8080"
+
+            [llm]
+            provider = "mistral"
+            model = "mistral-large-latest"
+        "#;
+        let config: Config = Figment::from(Toml::string(toml))
+            .extract()
+            .expect("le TOML sans [youtube] doit etre valide");
+        assert_eq!(config.youtube, YoutubeConfig::default());
+        assert_eq!(config.youtube.visibilite, "private");
+        assert_eq!(config.youtube.quota_uploads_jour, 6);
+
+        // Avec une section [youtube] explicite.
+        let toml = format!(
+            "{toml}\n[youtube]\nvisibilite = \"unlisted\"\ntags = [\"education\", \"test\"]\nquota_uploads_jour = 3\n"
+        );
+        let config: Config = Figment::from(Toml::string(&toml))
+            .extract()
+            .expect("le TOML avec [youtube] doit etre valide");
+        assert_eq!(config.youtube.visibilite, "unlisted");
+        assert_eq!(config.youtube.tags, vec!["education", "test"]);
+        assert_eq!(config.youtube.quota_uploads_jour, 3);
     }
 
     #[test]

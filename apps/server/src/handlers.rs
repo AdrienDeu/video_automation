@@ -34,8 +34,13 @@ fn erreur_interne(contexte: &str, e: impl std::fmt::Display) -> ErreurHttp {
 /// Fait avancer le pipeline tant que les portes sont ouvertes : transcription
 /// → scenario (Scenariste), puis, si le scenario est accepte, → visuels
 /// (Visuel), puis, si les visuels sont acceptes, → voix (Conteur), puis, si
-/// les voix sont acceptees, → montage (Monteur). S'arrete des qu'une
+/// les voix sont acceptees, → montage (Monteur), puis, si le montage est
+/// accepte, → publication (Publieur, derniere etape). S'arrete des qu'une
 /// transition en mode `validation` bloque.
+///
+/// La publication n'est tentee que si les identifiants OAuth YouTube sont
+/// configures (sinon le projet reste en `MontagePret` accepte ; ni le montage
+/// ni la publication n'ont besoin de la cle Mistral).
 async fn avancer_pipeline(etat: &AppState, projet: &mut Projet) -> Result<(), Error> {
     if projet.etat == EtatPipeline::Transcrit {
         let extracteur =
@@ -63,6 +68,14 @@ async fn avancer_pipeline(etat: &AppState, projet: &mut Projet) -> Result<(), Er
     {
         agents::monteur::produire_montage(projet, &etat.config, etat.config.pipeline.montage)
             .await?;
+    }
+    if projet.etat == EtatPipeline::MontagePret
+        && projet.validation_montage == Some(DecisionValidation::Accepte)
+    {
+        if let Some(contexte) = &etat.youtube {
+            agents::publieur::produire_publication(projet, &etat.config, &etat.stockage, contexte)
+                .await?;
+        }
     }
     Ok(())
 }
@@ -310,7 +323,9 @@ pub struct RequeteValidation {
 ///
 /// Apres une acceptation, le pipeline enchaine avec l'etape suivante si une
 /// cle API est disponible (visuels apres scenario, voix apres visuels,
-/// montage apres voix).
+/// montage apres voix) ; apres acceptation du montage, la publication
+/// YouTube est enchainee sans cle Mistral si les identifiants OAuth sont
+/// configures.
 ///
 /// Renvoie `409` si le projet n'attend pas de decision (mauvais etat ou etape
 /// deja tranchee), `404` si le projet est inconnu.
@@ -342,8 +357,13 @@ pub async fn post_valider(
         .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
 
     // Etape acceptee : on enchaine avec la suite du pipeline si possible
-    // (avancer_pipeline ne franchit que les portes ouvertes).
-    let statut = if requete.decision == DecisionValidation::Accepte && etat.cle_api.is_some() {
+    // (avancer_pipeline ne franchit que les portes ouvertes). Les etapes
+    // amont exigent la cle Mistral ; le montage etant accepte, la
+    // publication — qui n'en a pas besoin — peut etre enchainee des lors que
+    // les identifiants YouTube sont configures.
+    let suite_possible = etat.cle_api.is_some()
+        || (etape == pipeline::validation::EtapeValidation::Montage && etat.youtube.is_some());
+    let statut = if requete.decision == DecisionValidation::Accepte && suite_possible {
         match avancer_pipeline(&etat, &mut projet).await {
             Ok(()) => StatusCode::OK,
             Err(erreur) => {
@@ -434,6 +454,15 @@ mod tests {
     /// Construit l'application avec un dossier de donnees temporaire et sans
     /// cle API (transcription et scenario sont alors desactives).
     async fn app_de_test(data_dir: std::path::PathBuf) -> Router {
+        app_de_test_youtube(data_dir, None).await
+    }
+
+    /// Construit l'application avec un contexte de publication YouTube
+    /// optionnel (mock local dans les tests de phase 6).
+    async fn app_de_test_youtube(
+        data_dir: std::path::PathBuf,
+        youtube: Option<agents::publieur::ContextePublication>,
+    ) -> Router {
         let stockage = Stockage::ouvrir(&data_dir)
             .await
             .expect("ouverture de la base de test");
@@ -448,10 +477,12 @@ mod tests {
             audio: AudioConfig::default(),
             pipeline: PipelineConfig::default(),
             voix: VoixConfig::default(),
+            youtube: video_core::config::YoutubeConfig::default(),
         };
         construire_routeur(Arc::new(AppState {
             config,
             cle_api: None,
+            youtube,
             stockage,
         }))
     }
@@ -867,7 +898,131 @@ mod tests {
         assert_eq!(reponse.status(), StatusCode::OK);
         let projet = projet_depuis(reponse).await;
         assert_eq!(projet.validation_montage, Some(DecisionValidation::Accepte));
+        // Sans cle Mistral ni identifiants YouTube, le pipeline s'arrete la.
         assert_eq!(projet.etat, EtatPipeline::MontagePret);
+    }
+
+    /// Demarre un mock YouTube local (OAuth + upload reprenable) et renvoie
+    /// le contexte de publication pointant dessus.
+    async fn contexte_youtube_mock() -> agents::publieur::ContextePublication {
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use axum::routing::{post, put};
+
+        #[derive(Clone)]
+        struct EtatMock {
+            base: Arc<String>,
+        }
+
+        async fn token() -> Json<serde_json::Value> {
+            Json(serde_json::json!({"access_token": "jeton-test"}))
+        }
+        async fn init(State(etat): State<EtatMock>) -> impl IntoResponse {
+            (
+                StatusCode::OK,
+                [(
+                    axum::http::header::LOCATION.as_str(),
+                    format!("{}/session", etat.base),
+                )],
+                "",
+            )
+        }
+        async fn chunk() -> impl IntoResponse {
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({"kind": "youtube#video", "id": "video123"})),
+            )
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("ecoute du mock");
+        let adresse = listener.local_addr().expect("adresse du mock");
+        let base = format!("http://{adresse}");
+        let app = Router::new()
+            .route("/token", post(token))
+            .route("/upload", post(init))
+            .route("/session", put(chunk))
+            .with_state(EtatMock {
+                base: Arc::new(base.clone()),
+            });
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        agents::publieur::ContextePublication {
+            secrets: video_core::config::SecretsYoutube {
+                client_id: "client-test".to_string(),
+                client_secret: "secret-test".to_string(),
+                refresh_token: "refresh-test".to_string(),
+            },
+            endpoints: tools::youtube::EndpointsYoutube {
+                oauth: format!("{base}/token"),
+                upload: format!("{base}/upload"),
+            },
+        }
+    }
+
+    /// Ecrit la fausse video finale attendue par le Publieur.
+    async fn semer_video(data_dir: &std::path::Path) {
+        let dossier = data_dir.join("projetscenario");
+        tokio::fs::create_dir_all(&dossier)
+            .await
+            .expect("creation du dossier du projet");
+        tokio::fs::write(dossier.join("video.mp4"), b"fausse video")
+            .await
+            .expect("ecriture de la video");
+    }
+
+    #[tokio::test]
+    async fn post_valider_montage_enchaine_la_publication_sans_cle_mistral() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let contexte = contexte_youtube_mock().await;
+        let app = app_de_test_youtube(temp.path().to_path_buf(), Some(contexte)).await;
+        semer_projet_montage(temp.path()).await;
+        semer_video(temp.path()).await;
+
+        let reponse = app
+            .oneshot(requete_validation_etape(
+                "projetscenario",
+                "accepte",
+                "montage",
+            ))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::OK);
+        let projet = projet_depuis(reponse).await;
+        assert_eq!(projet.etat, EtatPipeline::Publie);
+        let publication = projet.youtube.expect("publication consignee");
+        assert_eq!(publication.id_video, "video123");
+        assert_eq!(publication.url, "https://youtu.be/video123");
+    }
+
+    #[tokio::test]
+    async fn post_valider_montage_echoue_proprement_au_dela_du_quota() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let contexte = contexte_youtube_mock().await;
+        let app = app_de_test_youtube(temp.path().to_path_buf(), Some(contexte)).await;
+        semer_projet_montage(temp.path()).await;
+        semer_video(temp.path()).await;
+        // Quota du jour epuise (6 uploads par defaut).
+        let stockage = Stockage::ouvrir(temp.path()).await.expect("ouverture");
+        for _ in 0..6 {
+            stockage.incrementer_uploads().await.expect("increment");
+        }
+
+        let reponse = app
+            .oneshot(requete_validation_etape(
+                "projetscenario",
+                "accepte",
+                "montage",
+            ))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::BAD_GATEWAY);
+        let projet = projet_depuis(reponse).await;
+        match &projet.etat {
+            EtatPipeline::Erreur(message) => assert!(message.contains("quota"), "{message}"),
+            autre => panic!("un etat Erreur est attendu, pas {autre:?}"),
+        }
+        assert_eq!(projet.youtube, None);
     }
 
     #[tokio::test]

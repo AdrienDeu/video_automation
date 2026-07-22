@@ -24,6 +24,17 @@ const LIBELLES_ETATS = {
   erreur: "Erreur",
 };
 
+// Etapes du pipeline dans l'ordre, pour le stepper du detail.
+const ETAPES_PIPELINE = [
+  ["audio_recu", "Audio"],
+  ["transcrit", "Transcription"],
+  ["scenario_genere", "Scenario"],
+  ["visuels_prets", "Visuels"],
+  ["voix_pretes", "Voix"],
+  ["montage_pret", "Montage"],
+  ["publie", "Publie"],
+];
+
 // --- Petits utilitaires -----------------------------------------------------
 
 // Cree un element avec classe et texte optionnels (texte via textContent).
@@ -126,11 +137,14 @@ function renderListe(projets) {
   document.getElementById("liste-vide").hidden = projets.length > 0;
 
   for (const resume of projets) {
+    const info = normaliserEtat(resume.etat);
     const item = el("li", resume.id === projetCourant ? "projet actif" : "projet");
     const bouton = el("button", "projet-bouton");
     bouton.type = "button";
     bouton.append(el("span", "projet-id", resume.id.slice(0, 8)));
-    bouton.append(el("span", "projet-etat", libelleEtat(resume.etat)));
+    const etat = el("span", "projet-etat");
+    etat.append(el("span", "badge badge-" + info.code, libelleEtat(info.code)));
+    bouton.append(etat);
     bouton.append(el("span", "projet-date", resume.maj));
     bouton.addEventListener("click", () => selectionnerProjet(resume.id));
     item.append(bouton);
@@ -172,13 +186,36 @@ function renderDetail(projet) {
   document.getElementById("zone-detail").hidden = false;
   document.getElementById("detail-titre").textContent = "Projet " + projet.id;
 
+  renderEtapes(info);
   renderEtat(projet, info);
   renderTranscription(projet);
   renderScenario(projet);
   renderVisuels(projet);
   renderVoix(projet);
   renderMontage(projet);
+  renderPublication(projet);
   renderValidation(projet, info);
+}
+
+// Stepper des etapes du pipeline : faites, active, ou neutres si erreur
+// (on ne sait pas quelle etape a echoue).
+function renderEtapes(info) {
+  const zone = document.getElementById("detail-etapes");
+  zone.textContent = "";
+  const indexActif = ETAPES_PIPELINE.findIndex(([code]) => code === info.code);
+  const liste = el("ol", "etapes");
+  ETAPES_PIPELINE.forEach(([, libelle], index) => {
+    let classe = "etape";
+    if (info.code !== "erreur" && indexActif >= 0) {
+      if (index < indexActif) classe += " faite";
+      else if (index === indexActif) classe += " active";
+    }
+    const item = el("li", classe);
+    item.append(el("span", "etape-point"));
+    item.append(el("span", "etape-libelle", libelle));
+    liste.append(item);
+  });
+  zone.append(liste);
 }
 
 function renderEtat(projet, info) {
@@ -186,7 +223,7 @@ function renderEtat(projet, info) {
   zone.textContent = "";
   const ligne = el("p", "etat-courant");
   ligne.append(el("strong", null, "Etat : "));
-  ligne.append(document.createTextNode(libelleEtat(info.code)));
+  ligne.append(el("span", "badge badge-" + info.code, libelleEtat(info.code)));
   zone.append(ligne);
   if (info.code === "erreur" && info.message) {
     zone.append(el("p", "message-erreur", info.message));
@@ -346,6 +383,25 @@ function renderMontage(projet) {
     ligne.append(lien);
     zone.append(ligne);
   }
+}
+
+// --- Publication ------------------------------------------------------------
+
+// Lien YouTube une fois la video publiee.
+function renderPublication(projet) {
+  const zone = document.getElementById("detail-publication");
+  zone.textContent = "";
+  if (!projet.youtube) return;
+
+  zone.append(el("h3", null, "Publication"));
+  const ligne = el("p", "srt");
+  const lien = document.createElement("a");
+  lien.href = projet.youtube.url;
+  lien.target = "_blank";
+  lien.rel = "noopener noreferrer";
+  lien.textContent = "Voir la video sur YouTube";
+  ligne.append(lien);
+  zone.append(ligne);
 }
 
 // --- Validation humaine -----------------------------------------------------

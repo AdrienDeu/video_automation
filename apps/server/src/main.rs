@@ -11,6 +11,8 @@
 //! Monteur ; interface web embarquee (`GET /`) : envoi d'audio, liste des
 //! projets (`GET /projets`), suivi et validation par etape, service des
 //! fichiers du projet (`GET /projet/{id}/fichier/{nom}`).
+//! Phase 6 : publication YouTube par l'agent Publieur une fois le montage
+//! accepte (si les identifiants OAuth sont configures).
 
 mod audio;
 mod handlers;
@@ -32,6 +34,9 @@ pub struct AppState {
     /// transcription et la generation de scenario (l'audio est alors
     /// simplement stocke).
     pub cle_api: Option<String>,
+    /// Contexte de publication YouTube capture au demarrage ; `None`
+    /// desactive la publication (le pipeline s'arrete a `MontagePret`).
+    pub youtube: Option<agents::publieur::ContextePublication>,
     /// Persistance SQLite des projets.
     pub stockage: Stockage,
 }
@@ -61,13 +66,21 @@ async fn main() -> Result<(), Error> {
     let adresse = config.server_addr.clone();
 
     let stockage = Stockage::ouvrir(&config.data_dir).await?;
+    let youtube = agents::publieur::ContextePublication::depuis_environnement(&config.data_dir);
     let etat = Arc::new(AppState {
         cle_api: config::cle_api_mistral(),
+        youtube,
         config,
         stockage,
     });
     if etat.cle_api.is_none() {
         eprintln!("attention : MISTRAL_API_KEY absente, transcription et scenario sont desactives");
+    }
+    if etat.youtube.is_none() {
+        eprintln!(
+            "attention : identifiants YouTube absents (YOUTUBE_CLIENT_ID/SECRET + refresh token), \
+             la publication est desactivee — lancez `cli youtube-auth` pour l'activer"
+        );
     }
 
     let app = construire_routeur(etat);

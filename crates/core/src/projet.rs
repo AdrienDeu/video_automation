@@ -52,6 +52,18 @@ pub struct Projet {
     /// Decision de validation humaine du montage.
     #[serde(default)]
     pub validation_montage: Option<DecisionValidation>,
+    /// Publication YouTube, presente une fois l'etat `Publie` atteint.
+    #[serde(default)]
+    pub youtube: Option<PublicationYoutube>,
+}
+
+/// Trace d'une publication YouTube reussie (phase 6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationYoutube {
+    /// Identifiant de la video sur YouTube.
+    pub id_video: String,
+    /// URL publique de la video (ex. `https://youtu.be/<id>`).
+    pub url: String,
 }
 
 /// Decision prise par l'utilisateur sur une etape en mode `validation`.
@@ -82,6 +94,7 @@ impl Projet {
             video: None,
             preview: None,
             validation_montage: None,
+            youtube: None,
         }
     }
 }
@@ -140,5 +153,39 @@ mod tests {
         let relu: Projet = serde_json::from_str(&json).expect("deserialisation");
         assert_eq!(relu, projet);
         assert_eq!(relu.etat, EtatPipeline::Transcrit);
+    }
+
+    #[test]
+    fn deserialise_un_projet_d_avant_la_phase_6() {
+        // JSON persiste avant l'ajout du champ `youtube` : le defaut serde
+        // doit combler l'absence du champ.
+        let json = r#"{
+            "id": "abc123",
+            "etat": "montage_pret",
+            "audio": "audio.wav",
+            "transcription": null,
+            "scenario": null,
+            "validation_scenario": null
+        }"#;
+        let projet: Projet = serde_json::from_str(json).expect("deserialisation");
+        assert_eq!(projet.etat, EtatPipeline::MontagePret);
+        assert_eq!(projet.youtube, None);
+    }
+
+    #[test]
+    fn serialisation_projet_publie() {
+        let mut projet = Projet::nouveau("abc123");
+        projet.etat = EtatPipeline::Publie;
+        projet.youtube = Some(PublicationYoutube {
+            id_video: "dQw4w9WgXcQ".to_string(),
+            url: "https://youtu.be/dQw4w9WgXcQ".to_string(),
+        });
+        let json = serde_json::to_string(&projet).expect("serialisation");
+        let relu: Projet = serde_json::from_str(&json).expect("deserialisation");
+        assert_eq!(relu, projet);
+        assert_eq!(
+            relu.youtube.expect("publication presente").url,
+            "https://youtu.be/dQw4w9WgXcQ"
+        );
     }
 }

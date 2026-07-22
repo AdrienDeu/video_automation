@@ -6,7 +6,12 @@
 //! - `validation` : porte de validation humaine du scenario
 //!   (`POST /valider`).
 //!
+//! Phase 7 :
+//! - `affiner` : regeneration ciblee d'une etape avec invalidation de l'aval
+//!   (`POST /affiner`).
+//!
 //! Les types d'etat sont definis dans `video_core::etat`.
 
+pub mod affiner;
 pub mod stockage;
 pub mod validation;

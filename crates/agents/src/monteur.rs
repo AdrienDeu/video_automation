@@ -7,6 +7,7 @@
 //! ffmpeg (preview 480p puis video 1080p) a partir des livrables des etapes
 //! amont. Aucune commande libre n'est jamais construite.
 
+use video_core::annulation::{point_de_controle, CancellationToken};
 use video_core::config::Config;
 use video_core::error::Error;
 use video_core::etat::{EtatPipeline, ModeTransition};
@@ -33,10 +34,13 @@ const NOM_PREVIEW: &str = "preview.mp4";
 ///   voix n'ont pas ete acceptees, ou si une scene n'a pas de visuel, de
 ///   voix ou de sous-titres.
 /// - `Error::Tool` si ffmpeg est introuvable ou si un rendu echoue.
+/// - `Error::Annulation` si l'annulation est demandee avant ou pendant un
+///   rendu (le process ffmpeg est alors tue, cf. `kill_on_drop` cote outil).
 pub async fn produire_montage(
     projet: &mut Projet,
     config: &Config,
     mode: ModeTransition,
+    token: &CancellationToken,
 ) -> Result<(), Error> {
     if projet.etat != EtatPipeline::VoixPretes {
         return Err(Error::Pipeline(format!(
@@ -93,9 +97,12 @@ pub async fn produire_montage(
 
     let dossier = config.data_dir.join(&projet.id);
     // Preview d'abord : en cas d'echec du rendu final, une preview reste
-    // disponible pour diagnostiquer.
-    ffmpeg::monter(&dossier, &scenes, Some(&srt), &PROFIL_PREVIEW, NOM_PREVIEW).await?;
-    ffmpeg::monter(&dossier, &scenes, Some(&srt), &PROFIL_FINAL, NOM_VIDEO).await?;
+    // disponible pour diagnostiquer. Chaque rendu est interruptible : en cas
+    // d'annulation, la future est abandonnee et `kill_on_drop` tue ffmpeg.
+    point_de_controle(token)?;
+    rendre(&dossier, &scenes, &srt, &PROFIL_PREVIEW, NOM_PREVIEW, token).await?;
+    point_de_controle(token)?;
+    rendre(&dossier, &scenes, &srt, &PROFIL_FINAL, NOM_VIDEO, token).await?;
 
     projet.preview = Some(NOM_PREVIEW.to_string());
     projet.video = Some(NOM_VIDEO.to_string());
@@ -104,6 +111,22 @@ pub async fn produire_montage(
         projet.validation_montage = Some(DecisionValidation::Accepte);
     }
     Ok(())
+}
+
+/// Rend un profil ffmpeg interruptible : l'annulation abandonne la future de
+/// rendu, ce qui tue le process ffmpeg (`kill_on_drop` cote outil).
+async fn rendre(
+    dossier: &std::path::Path,
+    scenes: &[SceneMontage],
+    srt: &str,
+    profil: &ffmpeg::ProfilRendu,
+    sortie: &str,
+    token: &CancellationToken,
+) -> Result<(), Error> {
+    tokio::select! {
+        () = token.cancelled() => Err(Error::Annulation),
+        resultat = ffmpeg::monter(dossier, scenes, Some(srt), profil, sortie) => resultat,
+    }
 }
 
 #[cfg(test)]
@@ -246,7 +269,13 @@ mod tests {
         let mut projet = projet_voix_acceptees();
         projet.etat = EtatPipeline::VisuelsPrets;
 
-        let resultat = produire_montage(&mut projet, &config, ModeTransition::Validation).await;
+        let resultat = produire_montage(
+            &mut projet,
+            &config,
+            ModeTransition::Validation,
+            &CancellationToken::new(),
+        )
+        .await;
         match resultat {
             Err(Error::Pipeline(message)) => {
                 assert!(message.contains("VoixPretes"), "{message}")
@@ -262,7 +291,13 @@ mod tests {
         let mut projet = projet_voix_acceptees();
         projet.validation_voix = None; // voix pas encore tranchees
 
-        let resultat = produire_montage(&mut projet, &config, ModeTransition::Validation).await;
+        let resultat = produire_montage(
+            &mut projet,
+            &config,
+            ModeTransition::Validation,
+            &CancellationToken::new(),
+        )
+        .await;
         match resultat {
             Err(Error::Pipeline(message)) => {
                 assert!(message.contains("acceptation des voix"), "{message}")
@@ -284,9 +319,14 @@ mod tests {
         let mut projet = projet_voix_acceptees();
         semer_fichiers(temp.path(), &projet);
 
-        produire_montage(&mut projet, &config, ModeTransition::Validation)
-            .await
-            .expect("le montage doit aboutir");
+        produire_montage(
+            &mut projet,
+            &config,
+            ModeTransition::Validation,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("le montage doit aboutir");
 
         assert_eq!(projet.etat, EtatPipeline::MontagePret);
         assert_eq!(projet.video.as_deref(), Some("video.mp4"));
@@ -318,11 +358,29 @@ mod tests {
         let mut projet = projet_voix_acceptees();
         semer_fichiers(temp.path(), &projet);
 
-        produire_montage(&mut projet, &config, ModeTransition::Auto)
-            .await
-            .expect("le montage doit aboutir");
+        produire_montage(
+            &mut projet,
+            &config,
+            ModeTransition::Auto,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("le montage doit aboutir");
 
         assert_eq!(projet.etat, EtatPipeline::MontagePret);
         assert_eq!(projet.validation_montage, Some(DecisionValidation::Accepte));
+    }
+
+    #[tokio::test]
+    async fn s_interrompt_avant_le_premier_rendu_si_annule() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let config = config_de_test(temp.path());
+        let mut projet = projet_voix_acceptees();
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let resultat = produire_montage(&mut projet, &config, ModeTransition::Validation, &token).await;
+        assert!(matches!(resultat, Err(Error::Annulation)));
+        assert_eq!(projet.etat, EtatPipeline::VoixPretes);
     }
 }

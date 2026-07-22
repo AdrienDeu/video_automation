@@ -541,12 +541,12 @@ button:disabled {
   color: var(--accent);
 }
 
-.visuel-remplacer {
+.visuel-remplacer, .affinage {
   display: flex;
   gap: 0.4rem;
 }
 
-.visuel-remplacer input {
+.visuel-remplacer input, .affinage input {
   flex: 1;
   min-width: 0;
   font: inherit;
@@ -558,7 +558,7 @@ button:disabled {
   color: var(--texte);
 }
 
-.visuel-remplacer button {
+.visuel-remplacer button, .affinage button {
   padding: 0.35rem 0.7rem;
   font-size: 0.82rem;
   background: var(--accent-doux);
@@ -566,9 +566,23 @@ button:disabled {
   box-shadow: none;
 }
 
-.visuel-remplacer button:hover:not(:disabled) {
+.visuel-remplacer button:hover:not(:disabled),
+.affinage button:hover:not(:disabled) {
   background: rgba(110, 139, 255, 0.25);
   box-shadow: none;
+}
+
+.affinage {
+  margin-top: 0.6rem;
+  max-width: 32rem;
+}
+
+.message-info {
+  color: var(--accent);
+  background: var(--accent-doux);
+  border: 1px solid rgba(110, 139, 255, 0.3);
+  border-radius: var(--rayon-petit);
+  padding: 0.6rem 0.9rem;
 }
 
 /* --- Voix --- */

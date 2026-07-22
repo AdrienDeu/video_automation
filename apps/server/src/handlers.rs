@@ -1,19 +1,23 @@
 //! Gestionnaires des routes HTTP du serveur.
 
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::extract::{Multipart, Path, State};
 use axum::http::{header, StatusCode};
+use axum::response::sse::{Event, Sse};
 use axum::Json;
 use pipeline::stockage::ProjetResume;
 use serde::Deserialize;
+use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
+use video_core::annulation::{point_de_controle, CancellationToken};
 use video_core::error::Error;
 use video_core::etat::EtatPipeline;
 use video_core::projet::{DecisionValidation, Projet};
 
 use crate::store;
-use crate::{audio, AppState};
+use crate::{audio, tache, AppState};
 
 /// Taille maximale d'un fichier audio envoye (100 Mio).
 const TAILLE_MAX_AUDIO: usize = 100 * 1024 * 1024;
@@ -31,6 +35,31 @@ fn erreur_interne(contexte: &str, e: impl std::fmt::Display) -> ErreurHttp {
     )
 }
 
+/// Flux SSE d'un projet : un evenement JSON par changement d'etat.
+type FluxProjet = Sse<ReceiverStream<Result<Event, Infallible>>>;
+
+/// Persiste le projet puis notifie les abonnes SSE (`GET /projet/{id}/events`)
+/// du changement. Sans abonne, la notification est simplement perdue.
+pub(crate) async fn sauvegarder_et_notifier(
+    etat: &AppState,
+    projet: &Projet,
+) -> Result<(), ErreurHttp> {
+    etat.stockage
+        .sauvegarder(projet)
+        .await
+        .map_err(|e| erreur_interne("persistance du projet", e))?;
+    let _ = etat.evenements.send(projet.id.clone());
+    Ok(())
+}
+
+/// Persiste un point d'etape intermediaire depuis la tache de fond (les
+/// abonnes SSE suivent la progression et un crash ne perd pas l'etape).
+async fn sauvegarder_point_d_etape(etat: &AppState, projet: &Projet) -> Result<(), Error> {
+    sauvegarder_et_notifier(etat, projet)
+        .await
+        .map_err(|(_, message)| Error::Persistance(message))
+}
+
 /// Fait avancer le pipeline tant que les portes sont ouvertes : transcription
 /// → scenario (Scenariste), puis, si le scenario est accepte, → visuels
 /// (Visuel), puis, si les visuels sont acceptes, → voix (Conteur), puis, si
@@ -43,10 +72,16 @@ fn erreur_interne(contexte: &str, e: impl std::fmt::Display) -> ErreurHttp {
 /// ni la publication n'ont besoin de la cle Mistral).
 async fn avancer_pipeline(etat: &AppState, projet: &mut Projet) -> Result<(), Error> {
     if projet.etat == EtatPipeline::Transcrit {
-        let extracteur =
-            llm::scenariste::construire_extracteur_scenario_depuis_config(&etat.config.llm)?;
-        agents::realisateur::produire_scenario(projet, &extracteur, etat.config.pipeline.scenario)
-            .await?;
+        let extracteur = etat
+            .scenariste
+            .as_ref()
+            .ok_or_else(|| Error::Llm("MISTRAL_API_KEY absente de l'environnement".to_string()))?;
+        agents::realisateur::produire_scenario(
+            projet,
+            extracteur.as_ref(),
+            etat.config.pipeline.scenario,
+        )
+        .await?;
     }
     if projet.etat == EtatPipeline::ScenarioGenere
         && projet.validation_scenario == Some(DecisionValidation::Accepte)
@@ -188,10 +223,7 @@ pub async fn post_audio(
 
     let mut projet = Projet::nouveau(id);
     projet.audio = Some(nom_audio);
-    etat.stockage
-        .sauvegarder(&projet)
-        .await
-        .map_err(|e| erreur_interne("persistance du projet", e))?;
+    sauvegarder_et_notifier(&etat, &projet).await?;
 
     // Sans cle API, l'audio est stocke et les etapes LLM restent a faire.
     let Some(cle) = &etat.cle_api else {
@@ -211,18 +243,12 @@ pub async fn post_audio(
                     StatusCode::BAD_GATEWAY
                 }
             };
-            etat.stockage
-                .sauvegarder(&projet)
-                .await
-                .map_err(|e| erreur_interne("persistance du projet", e))?;
+            sauvegarder_et_notifier(&etat, &projet).await?;
             Ok((statut, Json(projet)))
         }
         Err(erreur) => {
             projet.etat = EtatPipeline::Erreur(erreur.to_string());
-            etat.stockage
-                .sauvegarder(&projet)
-                .await
-                .map_err(|e| erreur_interne("persistance du projet", e))?;
+            sauvegarder_et_notifier(&etat, &projet).await?;
             Ok((StatusCode::BAD_GATEWAY, Json(projet)))
         }
     }
@@ -375,10 +401,7 @@ pub async fn post_valider(
         StatusCode::OK
     };
 
-    etat.stockage
-        .sauvegarder(&projet)
-        .await
-        .map_err(|e| erreur_interne("persistance du projet", e))?;
+    sauvegarder_et_notifier(&etat, &projet).await?;
     Ok((statut, Json(projet)))
 }
 
@@ -427,11 +450,193 @@ pub async fn post_remplacer_visuel(
             _ => (StatusCode::BAD_GATEWAY, e.to_string()),
         })?;
 
-    etat.stockage
-        .sauvegarder(&projet)
-        .await
-        .map_err(|e| erreur_interne("persistance du projet", e))?;
+    sauvegarder_et_notifier(&etat, &projet).await?;
     Ok(Json(projet))
+}
+
+/// Corps de `POST /affiner`.
+#[derive(Debug, Deserialize)]
+pub struct RequeteAffinage {
+    /// Identifiant du projet.
+    pub id: String,
+    /// Etape a regenerer (`scenario`, `visuels`, `voix` ou `montage`).
+    pub etape: pipeline::validation::EtapeValidation,
+    /// Consigne d'affinage de l'utilisateur (integree au prompt du
+    /// Scenariste ou du Visuel ; journalisee mais sans effet pour les
+    /// regenerations mecaniques des voix et du montage).
+    pub prompt: String,
+}
+
+/// `POST /affiner` : regenere une etape avec une consigne utilisateur, puis
+/// relance uniquement les etapes impactees (phase 7).
+///
+/// Les artefacts et validations des etapes strictement en aval sont invalides
+/// (`pipeline::affiner::reinitialiser_aval`), l'etape est regeneree avec la
+/// consigne, puis `avancer_pipeline` enchaine tant que les portes sont
+/// ouvertes. La validation de l'etape affinee devra etre re-tranchee si sa
+/// porte est en mode `validation`.
+///
+/// Renvoie `404` si le projet est inconnu, `409` s'il n'a pas encore atteint
+/// l'etape demandee, `502` si la regeneration echoue (le projet est alors
+/// persiste en etat `Erreur`).
+pub async fn post_affiner(
+    State(etat): State<Arc<AppState>>,
+    Json(requete): Json<RequeteAffinage>,
+) -> Result<(StatusCode, Json<Projet>), ErreurHttp> {
+    if !store::id_valide(&requete.id) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "identifiant de projet invalide".to_string(),
+        ));
+    }
+    let mut projet = match etat.stockage.charger(&requete.id).await {
+        Ok(Some(projet)) => projet,
+        Ok(None) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("projet inconnu : {}", requete.id),
+            ))
+        }
+        Err(e) => return Err(erreur_interne("lecture du projet", e)),
+    };
+
+    pipeline::affiner::reinitialiser_aval(&mut projet, requete.etape)
+        .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
+
+    let statut = match regenerer_etape(&etat, &mut projet, requete.etape, &requete.prompt).await {
+        Ok(()) => match avancer_pipeline(&etat, &mut projet).await {
+            Ok(()) => StatusCode::OK,
+            Err(erreur) => {
+                projet.etat = EtatPipeline::Erreur(erreur.to_string());
+                StatusCode::BAD_GATEWAY
+            }
+        },
+        Err(erreur) => {
+            projet.etat = EtatPipeline::Erreur(erreur.to_string());
+            StatusCode::BAD_GATEWAY
+        }
+    };
+
+    sauvegarder_et_notifier(&etat, &projet).await?;
+    Ok((statut, Json(projet)))
+}
+
+/// Regenere le livrable d'une etape avec la consigne d'affinage, une fois
+/// l'aval invalide. Les voix et le montage sont des regenerations mecaniques
+/// (pas de LLM) : la consigne est journalisee, sans effet.
+async fn regenerer_etape(
+    etat: &AppState,
+    projet: &mut Projet,
+    etape: pipeline::validation::EtapeValidation,
+    prompt: &str,
+) -> Result<(), Error> {
+    match etape {
+        pipeline::validation::EtapeValidation::Scenario => {
+            let extracteur = etat.scenariste.as_ref().ok_or_else(|| {
+                Error::Llm("MISTRAL_API_KEY absente de l'environnement".to_string())
+            })?;
+            agents::realisateur::affiner_scenario(
+                projet,
+                extracteur.as_ref(),
+                prompt,
+                etat.config.pipeline.scenario,
+            )
+            .await
+        }
+        pipeline::validation::EtapeValidation::Visuels => {
+            agents::visuel::affiner_visuels_depuis_config(
+                projet,
+                &etat.config,
+                etat.config.pipeline.visuels,
+                prompt,
+            )
+            .await
+        }
+        pipeline::validation::EtapeValidation::Voix => {
+            eprintln!(
+                "affinage des voix du projet {} : regeneration mecanique, \
+                 consigne journalisee seulement : {prompt}",
+                projet.id
+            );
+            agents::conteur::produire_voix(projet, &etat.config, etat.config.pipeline.voix).await
+        }
+        pipeline::validation::EtapeValidation::Montage => {
+            eprintln!(
+                "affinage du montage du projet {} : regeneration mecanique, \
+                 consigne journalisee seulement : {prompt}",
+                projet.id
+            );
+            agents::monteur::produire_montage(projet, &etat.config, etat.config.pipeline.montage)
+                .await
+        }
+    }
+}
+
+/// `GET /projet/{id}/events` : flux SSE (`text/event-stream`) de l'etat d'un
+/// projet (phase 7). L'etat courant est emis a l'abonnement, puis a chaque
+/// changement persiste par les handlers (`sauvegarder_et_notifier`).
+///
+/// Renvoie `404` si le projet est inconnu.
+pub async fn get_projet_events(
+    State(etat): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<FluxProjet, ErreurHttp> {
+    if !store::id_valide(&id) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "identifiant de projet invalide".to_string(),
+        ));
+    }
+    match etat.stockage.charger(&id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err((StatusCode::NOT_FOUND, format!("projet inconnu : {id}"))),
+        Err(e) => return Err(erreur_interne("lecture du projet", e)),
+    }
+
+    // Abonnement AVANT de repondre : aucune notification ne peut etre perdue
+    // entre l'etat initial et l'ecoute.
+    let mut abonnement = etat.evenements.subscribe();
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    tokio::spawn(async move {
+        let mut premiere = true;
+        loop {
+            // Premier tour : etat initial. Ensuite : une notification visant
+            // ce projet (ou un rattrapage apres lag) declenche un renvoi.
+            let a_envoyer = if premiere {
+                premiere = false;
+                true
+            } else {
+                match abonnement.recv().await {
+                    Ok(id_notifie) => id_notifie == id,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            };
+            if !a_envoyer {
+                continue;
+            }
+            // L'etat est recharge a chaque notification : le canal ne
+            // transporte que des signaux, jamais de donnees potentiellement
+            // perimees.
+            let projet = match etat.stockage.charger(&id).await {
+                Ok(Some(projet)) => projet,
+                Ok(None) => break, // projet supprime : fin du flux
+                Err(_) => continue,
+            };
+            let donnees = match serde_json::to_string(&projet) {
+                Ok(donnees) => donnees,
+                Err(_) => continue,
+            };
+            if tx
+                .send(Ok(Event::default().event("projet").data(donnees)))
+                .await
+                .is_err()
+            {
+                break; // client deconnecte
+            }
+        }
+    });
+    Ok(Sse::new(ReceiverStream::new(rx)))
 }
 
 #[cfg(test)]
@@ -463,9 +668,28 @@ mod tests {
         data_dir: std::path::PathBuf,
         youtube: Option<agents::publieur::ContextePublication>,
     ) -> Router {
+        app_de_test_complete(data_dir, youtube, None).await
+    }
+
+    /// Construit l'application avec un Scenariste injecte (mock sans reseau
+    /// pour les tests d'affinage de phase 7).
+    async fn app_de_test_avec_scenariste(
+        data_dir: std::path::PathBuf,
+        scenariste: Arc<dyn llm::scenariste::ExtracteurScenario>,
+    ) -> Router {
+        app_de_test_complete(data_dir, None, Some(scenariste)).await
+    }
+
+    /// Constructeur commun des applications de test.
+    async fn app_de_test_complete(
+        data_dir: std::path::PathBuf,
+        youtube: Option<agents::publieur::ContextePublication>,
+        scenariste: Option<Arc<dyn llm::scenariste::ExtracteurScenario>>,
+    ) -> Router {
         let stockage = Stockage::ouvrir(&data_dir)
             .await
             .expect("ouverture de la base de test");
+        let (evenements, _) = tokio::sync::broadcast::channel(64);
         let config = Config {
             data_dir,
             server_addr: "127.0.0.1:0".to_string(),
@@ -484,6 +708,8 @@ mod tests {
             cle_api: None,
             youtube,
             stockage,
+            scenariste,
+            evenements,
         }))
     }
 
@@ -1271,5 +1497,345 @@ mod tests {
             .to_str()
             .expect("content-type lisible")
             .starts_with("text/css"));
+    }
+
+    // --- Phase 7 : affinage et suivi temps reel -----------------------------
+
+    /// Construit une requete `POST /affiner`.
+    fn requete_affinage(id: &str, etape: &str, prompt: &str) -> Request<Body> {
+        Request::post("/affiner")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{ "id": "{id}", "etape": "{etape}", "prompt": "{prompt}" }}"#
+            )))
+            .expect("construction de la requete")
+    }
+
+    /// Scenariste factice : capture la demande recue et soumet un scenario
+    /// corrige, sans aucun appel LLM (pattern d'injection des tests agents).
+    struct ScenaristeFactice {
+        demandes: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl llm::scenariste::ExtracteurScenario for ScenaristeFactice {
+        fn extraire(&self, demande: String) -> llm::scenariste::FuturScenario<'_> {
+            self.demandes
+                .lock()
+                .expect("mutex non empoisonne")
+                .push(demande);
+            Box::pin(async {
+                Ok(Scenario {
+                    titre: "Scenario affine".to_string(),
+                    public: "tout public".to_string(),
+                    style_images: "photos".to_string(),
+                    scenes: vec![Scene {
+                        narration: "Version corrigee.".to_string(),
+                        dialogues: vec![],
+                        description_visuelle: "Visuel corrige".to_string(),
+                        duree_cible: 6.0,
+                    }],
+                })
+            })
+        }
+    }
+
+    /// Fait passer le projet seme au bout du pipeline (publication YouTube
+    /// consignee) : point de depart des tests de propagation en aval.
+    async fn semer_projet_publie(data_dir: &std::path::Path) -> Projet {
+        let mut projet = semer_projet_montage(data_dir).await;
+        projet.etat = EtatPipeline::Publie;
+        // La transcription est exigee par la regeneration du scenario.
+        projet.transcription = Some(video_core::projet::Transcription {
+            texte: "Un sujet dicte au telephone.".to_string(),
+            langue: Some("fr".to_string()),
+            segments: vec![],
+        });
+        projet.youtube = Some(video_core::projet::PublicationYoutube {
+            id_video: "video123".to_string(),
+            url: "https://youtu.be/video123".to_string(),
+        });
+        let stockage = Stockage::ouvrir(data_dir).await.expect("ouverture");
+        stockage.sauvegarder(&projet).await.expect("persistance");
+        projet
+    }
+
+    #[tokio::test]
+    async fn post_affiner_scenario_regenere_et_invalide_l_aval() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let scenariste = Arc::new(ScenaristeFactice {
+            demandes: std::sync::Mutex::new(vec![]),
+        });
+        let app = app_de_test_avec_scenariste(temp.path().to_path_buf(), scenariste.clone()).await;
+        semer_projet_publie(temp.path()).await;
+
+        let reponse = app
+            .oneshot(requete_affinage(
+                "projetscenario",
+                "scenario",
+                "Raccourcis la video",
+            ))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::OK);
+        let projet = projet_depuis(reponse).await;
+
+        // Le scenario est regenere et l'etat repart a ScenarioGenere (mode
+        // validation par defaut : la decision devra etre re-tranchee).
+        assert_eq!(projet.etat, EtatPipeline::ScenarioGenere);
+        let scenario = projet.scenario.expect("scenario regenere");
+        assert_eq!(scenario.titre, "Scenario affine");
+        assert_eq!(projet.validation_scenario, None);
+        // Tout l'aval est invalide : seules les etapes impactees repartent.
+        assert!(projet.visuels.is_empty());
+        assert_eq!(projet.validation_visuels, None);
+        assert!(projet.voix.is_empty());
+        assert!(projet.sous_titres.is_empty());
+        assert_eq!(projet.validation_voix, None);
+        assert_eq!(projet.video, None);
+        assert_eq!(projet.preview, None);
+        assert_eq!(projet.validation_montage, None);
+        assert_eq!(projet.youtube, None);
+
+        // La demande au Scenariste contient le scenario actuel et la consigne.
+        let demandes = scenariste.demandes.lock().expect("mutex non empoisonne");
+        assert_eq!(demandes.len(), 1);
+        assert!(
+            demandes[0].contains("Raccourcis la video"),
+            "{}",
+            demandes[0]
+        );
+        assert!(demandes[0].contains("Sujet dicte"), "{}", demandes[0]);
+    }
+
+    #[tokio::test]
+    async fn post_affiner_scenario_sans_scenariste_renvoie_502() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        // app_de_test : pas de Scenariste injecte (cle API absente).
+        let app = app_de_test(temp.path().to_path_buf()).await;
+        semer_projet_scenario(temp.path()).await;
+
+        let reponse = app
+            .oneshot(requete_affinage("projetscenario", "scenario", "Raccourcis"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::BAD_GATEWAY);
+        let projet = projet_depuis(reponse).await;
+        match &projet.etat {
+            EtatPipeline::Erreur(message) => {
+                assert!(message.contains("MISTRAL_API_KEY"), "{message}")
+            }
+            autre => panic!("un etat Erreur est attendu, pas {autre:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn post_affiner_refuse_une_etape_non_atteinte() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+        semer_projet_scenario(temp.path()).await; // pas de voix produites
+
+        let reponse = app
+            .oneshot(requete_affinage("projetscenario", "voix", "Plus lent"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::CONFLICT);
+
+        // Le projet est inchange.
+        let stockage = Stockage::ouvrir(temp.path()).await.expect("ouverture");
+        let projet = stockage
+            .charger("projetscenario")
+            .await
+            .expect("chargement")
+            .expect("projet present");
+        assert_eq!(projet.etat, EtatPipeline::ScenarioGenere);
+        assert!(projet.scenario.is_some());
+    }
+
+    #[tokio::test]
+    async fn post_affiner_projet_inconnu_renvoie_404() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+
+        let reponse = app
+            .oneshot(requete_affinage("inconnu123", "scenario", "Raccourcis"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// PNG 1x1 valide (rouge), fixture visuelle des scenes (meme fixture que
+    /// les tests du Monteur).
+    const PNG_1X1: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xfc,
+        0xcf, 0xc0, 0x50, 0x0f, 0x00, 0x04, 0x85, 0x01, 0x80, 0x84, 0xa9, 0x8c, 0x21, 0x00, 0x00,
+        0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    /// Genere un WAV valide (tonalite 440 Hz, PCM 16 bits mono, 8 kHz) ;
+    /// comme pour les tests du Monteur, pas un silence numerique (`loudnorm`
+    /// produit des NaN sur un silence parfait).
+    fn wav_tonalite(duree_ms: u32) -> Vec<u8> {
+        let taille_donnees = duree_ms * 16;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + taille_donnees).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav.extend_from_slice(&8000u32.to_le_bytes());
+        wav.extend_from_slice(&16000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&taille_donnees.to_le_bytes());
+        for i in 0..(duree_ms * 8) {
+            let echantillon = (f64::sin(2.0 * std::f64::consts::PI * 440.0 * f64::from(i) / 8000.0)
+                * 8000.0) as i16;
+            wav.extend_from_slice(&echantillon.to_le_bytes());
+        }
+        wav
+    }
+
+    #[tokio::test]
+    async fn post_affiner_montage_regenere_et_invalide_la_publication() {
+        if !tools::ffmpeg::ffmpeg_disponible().await {
+            eprintln!(
+                "ffmpeg absent : post_affiner_montage_regenere_et_invalide_la_publication ignore."
+            );
+            return;
+        }
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+        // Projet publie, avec des fichiers courts pour un rendu rapide.
+        let mut projet = semer_projet_publie(temp.path()).await;
+        projet.visuels[0].fichier = "scene-0.png".to_string();
+        projet.voix[0].fichier = "voix-0.wav".to_string();
+        projet.voix[0].duree = 1.5;
+        let stockage = Stockage::ouvrir(temp.path()).await.expect("ouverture");
+        stockage.sauvegarder(&projet).await.expect("persistance");
+        let dossier = temp.path().join("projetscenario");
+        tokio::fs::create_dir_all(&dossier)
+            .await
+            .expect("creation du dossier du projet");
+        tokio::fs::write(dossier.join("scene-0.png"), PNG_1X1)
+            .await
+            .expect("ecriture de l'image");
+        tokio::fs::write(dossier.join("voix-0.wav"), wav_tonalite(1500))
+            .await
+            .expect("ecriture de la voix");
+        tokio::fs::write(
+            dossier.join("sous-titres-fr.srt"),
+            "1\n00:00:00,000 --> 00:00:01,500\nBonjour.\n",
+        )
+        .await
+        .expect("ecriture du srt");
+
+        let reponse = app
+            .oneshot(requete_affinage(
+                "projetscenario",
+                "montage",
+                "Rends la preview plus lumineuse",
+            ))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::OK);
+        let projet = projet_depuis(reponse).await;
+
+        // Le montage est regenere (mode validation par defaut : la decision
+        // devra etre re-tranchee), la publication est invalidee.
+        assert_eq!(projet.etat, EtatPipeline::MontagePret);
+        assert_eq!(projet.video.as_deref(), Some("video.mp4"));
+        assert_eq!(projet.preview.as_deref(), Some("preview.mp4"));
+        assert_eq!(projet.validation_montage, None);
+        assert_eq!(projet.youtube, None);
+        // L'amont n'est pas touche.
+        assert!(projet.scenario.is_some());
+        assert_eq!(
+            projet.validation_scenario,
+            Some(DecisionValidation::Accepte)
+        );
+        assert_eq!(projet.visuels.len(), 1);
+        assert_eq!(projet.voix.len(), 1);
+        // Les rendus existent sur disque.
+        assert!(dossier.join("video.mp4").exists());
+        assert!(dossier.join("preview.mp4").exists());
+    }
+
+    #[tokio::test]
+    async fn sse_enet_l_etat_initial_puis_les_changements() {
+        use tokio_stream::StreamExt;
+
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+        semer_projet_scenario(temp.path()).await;
+
+        let reponse = app
+            .clone()
+            .oneshot(
+                Request::get("/projet/projetscenario/events")
+                    .body(Body::empty())
+                    .expect("construction de la requete"),
+            )
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::OK);
+        assert_eq!(
+            reponse.headers()["content-type"],
+            axum::http::HeaderValue::from_static("text/event-stream")
+        );
+        let mut flux = reponse.into_body().into_data_stream();
+
+        // L'etat courant est emis a l'abonnement.
+        let initial = tokio::time::timeout(std::time::Duration::from_secs(5), flux.next())
+            .await
+            .expect("evenement initial avant le timeout")
+            .expect("flux ouvert")
+            .expect("trame lisible");
+        let texte = String::from_utf8_lossy(&initial);
+        assert!(texte.contains("event: projet"), "{texte}");
+        assert!(texte.contains("scenario_genere"), "{texte}");
+
+        // Une sauvegarde (validation) pousse un evenement aux abonnes.
+        let reponse = app
+            .clone()
+            .oneshot(requete_validation("projetscenario", "accepte"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::OK);
+
+        let recu = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut accumule = String::new();
+            while !accumule.contains("accepte") {
+                match flux.next().await {
+                    Some(Ok(trame)) => accumule.push_str(&String::from_utf8_lossy(&trame)),
+                    Some(Err(e)) => panic!("trame illisible : {e}"),
+                    None => break,
+                }
+            }
+            accumule
+        })
+        .await
+        .expect("evenement de validation recu avant le timeout");
+        assert!(recu.contains("event: projet"), "{recu}");
+        assert!(recu.contains("accepte"), "{recu}");
+    }
+
+    #[tokio::test]
+    async fn sse_projet_inconnu_renvoie_404() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+
+        let reponse = app
+            .oneshot(
+                Request::get("/projet/inconnu123/events")
+                    .body(Body::empty())
+                    .expect("construction de la requete"),
+            )
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::NOT_FOUND);
     }
 }

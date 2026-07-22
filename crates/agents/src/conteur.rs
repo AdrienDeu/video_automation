@@ -8,6 +8,7 @@
 
 use std::path::Path;
 
+use video_core::annulation::{point_de_controle, CancellationToken};
 use video_core::config::{self, Config};
 use video_core::error::Error;
 use video_core::etat::{EtatPipeline, ModeTransition};
@@ -55,15 +56,17 @@ fn texte_scene(scene: &Scene) -> String {
 ///   visuels n'ont pas ete acceptes, ou si une scene n'a rien a dire.
 /// - `Error::Tool` si la synthese vocale echoue (cle API absente, appel
 ///   reseau, ecriture disque).
+/// - `Error::Annulation` si l'annulation est demandee entre deux scenes.
 pub async fn produire_voix(
     projet: &mut Projet,
     config: &Config,
     mode: ModeTransition,
+    token: &CancellationToken,
 ) -> Result<(), Error> {
     let langues = langues_du_projet(projet);
     let cle = config::cle_api_mistral()
         .ok_or_else(|| Error::Tool("MISTRAL_API_KEY absente de l'environnement".to_string()))?;
-    produire_voix_langues(projet, config, &langues, &cle, mode).await
+    produire_voix_langues(projet, config, &langues, &cle, mode, token).await
 }
 
 /// Implementation de [`produire_voix`], parametree par les langues cibles et
@@ -74,6 +77,7 @@ async fn produire_voix_langues(
     langues: &[String],
     cle_api: &str,
     mode: ModeTransition,
+    token: &CancellationToken,
 ) -> Result<(), Error> {
     if projet.etat != EtatPipeline::VisuelsPrets {
         return Err(Error::Pipeline(format!(
@@ -104,6 +108,7 @@ async fn produire_voix_langues(
     for langue in langues {
         let mut durees = Vec::with_capacity(scenario.scenes.len());
         for (index, scene) in scenario.scenes.iter().enumerate() {
+            point_de_controle(token)?;
             let texte = texte_scene(scene);
             if texte.is_empty() {
                 return Err(Error::Pipeline(format!(
@@ -258,6 +263,7 @@ mod tests {
             &["fr".to_string()],
             CLE,
             ModeTransition::Validation,
+            &CancellationToken::new(),
         )
         .await
         .expect("la production doit aboutir");
@@ -290,8 +296,15 @@ mod tests {
         semer_cache(&projet, &config, &["fr", "en"]);
 
         let langues = vec!["fr".to_string(), "en".to_string()];
-        produire_voix_langues(&mut projet, &config, &langues, CLE, ModeTransition::Auto)
-            .await
+        produire_voix_langues(
+            &mut projet,
+            &config,
+            &langues,
+            CLE,
+            ModeTransition::Auto,
+            &CancellationToken::new(),
+        )
+        .await
             .expect("la production doit aboutir");
 
         assert_eq!(projet.etat, EtatPipeline::VoixPretes);
@@ -320,6 +333,7 @@ mod tests {
             &["fr".to_string()],
             CLE,
             ModeTransition::Validation,
+            &CancellationToken::new(),
         )
         .await;
         match resultat {
@@ -343,6 +357,7 @@ mod tests {
             &["fr".to_string()],
             CLE,
             ModeTransition::Validation,
+            &CancellationToken::new(),
         )
         .await;
         match resultat {
@@ -365,8 +380,32 @@ mod tests {
             &["fr".to_string()],
             CLE,
             ModeTransition::Validation,
+            &CancellationToken::new(),
         )
         .await;
         assert!(matches!(resultat, Err(Error::Tool(_))));
+    }
+
+    #[tokio::test]
+    async fn s_interrompt_des_la_premiere_scene_si_annule() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let config = config_de_test(temp.path());
+        let mut projet = projet_visuels_acceptes();
+        semer_cache(&projet, &config, &["fr"]);
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let resultat = produire_voix_langues(
+            &mut projet,
+            &config,
+            &["fr".to_string()],
+            CLE,
+            ModeTransition::Validation,
+            &token,
+        )
+        .await;
+        assert!(matches!(resultat, Err(Error::Annulation)));
+        // Le projet reste dans son etat d'entree : reprise possible.
+        assert_eq!(projet.etat, EtatPipeline::VisuelsPrets);
     }
 }

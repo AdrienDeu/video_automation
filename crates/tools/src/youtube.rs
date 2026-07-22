@@ -390,6 +390,10 @@ async fn envoyer_chunk(
 
 /// Implementation de [`publier_video`], parametree par la taille de chunk :
 /// testable en plusieurs chunks avec un petit fichier.
+///
+/// `token` permet d'interrompre l'upload entre deux chunks
+/// (`POST /annuler`) : un chunk en vol se termine, le suivant n'est pas
+/// envoye.
 async fn publier_video_taille(
     http: &reqwest::Client,
     endpoints: &EndpointsYoutube,
@@ -397,6 +401,7 @@ async fn publier_video_taille(
     metadonnees: &MetadonneesVideo,
     chemin: &Path,
     taille_chunk: u64,
+    token: &video_core::annulation::CancellationToken,
 ) -> Result<String, Error> {
     let octets = std::fs::read(chemin)
         .map_err(|e| Error::Tool(format!("lecture de {} : {e}", chemin.display())))?;
@@ -410,6 +415,7 @@ async fn publier_video_taille(
     let session = initier_upload(http, endpoints, jeton, metadonnees, total).await?;
 
     for (debut, fin) in decouper_chunks(total, taille_chunk) {
+        video_core::annulation::point_de_controle(token)?;
         let mut tentatives = 0;
         loop {
             match envoyer_chunk(http, &session, jeton, &octets, debut, fin, total).await {
@@ -437,14 +443,16 @@ async fn publier_video_taille(
 /// # Erreurs
 /// `Error::Tool` si le fichier est illisible ou vide, si l'initialisation
 /// echoue, ou si un chunk est refuse apres plusieurs tentatives.
+/// `Error::Annulation` si l'annulation est demandee entre deux chunks.
 pub async fn publier_video(
     http: &reqwest::Client,
     endpoints: &EndpointsYoutube,
     jeton: &str,
     metadonnees: &MetadonneesVideo,
     chemin: &Path,
+    token: &video_core::annulation::CancellationToken,
 ) -> Result<String, Error> {
-    publier_video_taille(http, endpoints, jeton, metadonnees, chemin, TAILLE_CHUNK).await
+    publier_video_taille(http, endpoints, jeton, metadonnees, chemin, TAILLE_CHUNK, token).await
 }
 
 #[cfg(test)]
@@ -764,9 +772,16 @@ mod tests {
         let video = temp.path().join("video.mp4");
         std::fs::write(&video, b"fausse video mp4").expect("ecriture de la video");
 
-        let id = publier_video(&http, &endpoints, "jeton-test", &metadonnees, &video)
-            .await
-            .expect("upload reussi");
+        let id = publier_video(
+            &http,
+            &endpoints,
+            "jeton-test",
+            &metadonnees,
+            &video,
+            &video_core::annulation::CancellationToken::new(),
+        )
+        .await
+        .expect("upload reussi");
         assert_eq!(id, "video123");
 
         // Le mock a recu les octets du fichier, les bons en-tetes d'init et
@@ -810,9 +825,17 @@ mod tests {
         // 10 octets avec des chunks de 4 : 3 PUT, les deux premiers en 308.
         std::fs::write(&video, b"0123456789").expect("ecriture de la video");
 
-        let id = publier_video_taille(&http, &endpoints, "jeton-test", &metadonnees, &video, 4)
-            .await
-            .expect("upload reussi");
+        let id = publier_video_taille(
+            &http,
+            &endpoints,
+            "jeton-test",
+            &metadonnees,
+            &video,
+            4,
+            &video_core::annulation::CancellationToken::new(),
+        )
+        .await
+        .expect("upload reussi");
         assert_eq!(id, "video123");
         assert_eq!(
             mock.ranges.lock().expect("verrou").as_slice(),
@@ -835,7 +858,15 @@ mod tests {
         let video = temp.path().join("video.mp4");
         std::fs::write(&video, b"").expect("ecriture de la video");
 
-        let resultat = publier_video(&http, &endpoints, "jeton-test", &metadonnees, &video).await;
+        let resultat = publier_video(
+            &http,
+            &endpoints,
+            "jeton-test",
+            &metadonnees,
+            &video,
+            &video_core::annulation::CancellationToken::new(),
+        )
+        .await;
         match resultat {
             Err(Error::Tool(message)) => assert!(message.contains("vide"), "{message}"),
             autre => panic!("une erreur Tool est attendue, pas {autre:?}"),

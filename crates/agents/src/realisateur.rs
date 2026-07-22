@@ -6,11 +6,10 @@
 //! a etats et delegue la generation au Scenariste (`llm::scenariste`). Les
 //! versions conversationnelles arriveront avec les phases suivantes.
 
-use llm::{scenariste, CompletionModel, Extractor};
+use llm::scenariste::{self, ExtracteurScenario};
 use video_core::error::Error;
 use video_core::etat::{EtatPipeline, ModeTransition};
 use video_core::projet::{DecisionValidation, Projet};
-use video_core::scenario::Scenario;
 
 /// Fait passer un projet de `Transcrit` a `ScenarioGenere` en produisant le
 /// scenario via le Scenariste.
@@ -23,9 +22,9 @@ use video_core::scenario::Scenario;
 /// - `Error::Pipeline` si le projet n'est pas en etat `Transcrit` ou n'a pas
 ///   de transcription.
 /// - `Error::Llm` si la generation du scenario echoue.
-pub async fn produire_scenario<M: CompletionModel>(
+pub async fn produire_scenario(
     projet: &mut Projet,
-    extracteur: &Extractor<M, Scenario>,
+    extracteur: &dyn ExtracteurScenario,
     mode: ModeTransition,
 ) -> Result<(), Error> {
     if projet.etat != EtatPipeline::Transcrit {
@@ -39,6 +38,51 @@ pub async fn produire_scenario<M: CompletionModel>(
     })?;
 
     let scenario = scenariste::generer_scenario(extracteur, &transcription).await?;
+
+    projet.scenario = Some(scenario);
+    projet.etat = EtatPipeline::ScenarioGenere;
+    if mode == ModeTransition::Auto {
+        projet.validation_scenario = Some(DecisionValidation::Accepte);
+    }
+    Ok(())
+}
+
+/// Regenere le scenario d'un projet en integrant une consigne d'affinage de
+/// l'utilisateur (phase 7, `POST /affiner`).
+///
+/// Meme contrat d'etat que [`produire_scenario`] : le projet doit etre en
+/// etat `Transcrit` — le point de reprise apres invalidation de l'aval par
+/// `pipeline::affiner::reinitialiser_aval` — avec sa transcription et le
+/// scenario actuel (transmis au Scenariste avec la consigne). La validation
+/// du scenario suit le mode de transition : en mode `validation`, elle devra
+/// etre re-tranchee.
+///
+/// # Erreurs
+/// - `Error::Pipeline` si le projet n'est pas en etat `Transcrit`, sans
+///   transcription ou sans scenario actuel.
+/// - `Error::Llm` si la regeneration du scenario echoue.
+pub async fn affiner_scenario(
+    projet: &mut Projet,
+    extracteur: &dyn ExtracteurScenario,
+    consigne: &str,
+    mode: ModeTransition,
+) -> Result<(), Error> {
+    if projet.etat != EtatPipeline::Transcrit {
+        return Err(Error::Pipeline(format!(
+            "affinage du scenario sur un projet en etat {:?} (attendu : Transcrit)",
+            projet.etat
+        )));
+    }
+    let transcription = projet.transcription.clone().ok_or_else(|| {
+        Error::Pipeline("projet en etat Transcrit sans transcription".to_string())
+    })?;
+    let actuel = projet
+        .scenario
+        .clone()
+        .ok_or_else(|| Error::Pipeline("affinage du scenario sans scenario actuel".to_string()))?;
+
+    let scenario =
+        scenariste::affiner_scenario(extracteur, &transcription, &actuel, consigne).await?;
 
     projet.scenario = Some(scenario);
     projet.etat = EtatPipeline::ScenarioGenere;
@@ -62,6 +106,9 @@ mod tests {
     use rig_core::streaming::StreamingCompletionResponse;
     use rig_core::OneOrMany;
     use video_core::projet::Transcription;
+    use video_core::scenario::Scenario;
+
+    use llm::{CompletionModel, Extractor};
 
     /// Mock minimal de `CompletionModel` : reponses predefinies consommees
     /// dans l'ordre (meme principe que `llm/tests/hello_world.rs`).
@@ -206,5 +253,78 @@ mod tests {
         )
         .await;
         assert!(matches!(resultat, Err(Error::Pipeline(_))));
+    }
+
+    /// Projet en etat `Transcrit` avec un scenario deja produit (point de
+    /// reprise apres invalidation de l'aval, cf. `pipeline::affiner`).
+    fn projet_transcrit_avec_scenario() -> Projet {
+        let mut projet = projet_transcrit();
+        projet.scenario = Some(Scenario {
+            titre: "Ancien scenario".to_string(),
+            public: "tout public".to_string(),
+            style_images: "photos".to_string(),
+            scenes: vec![],
+        });
+        // L'aval a ete invalide : la decision precedente est effacee.
+        projet.validation_scenario = None;
+        projet
+    }
+
+    #[tokio::test]
+    async fn affine_le_scenario_en_mode_validation() {
+        let mut projet = projet_transcrit_avec_scenario();
+        affiner_scenario(
+            &mut projet,
+            &extracteur_factice(),
+            "Raccourcis la video",
+            ModeTransition::Validation,
+        )
+        .await
+        .expect("l'affinage doit aboutir");
+
+        assert_eq!(projet.etat, EtatPipeline::ScenarioGenere);
+        // Le mock soumet "Sujet dicte" : l'ancien scenario est remplace.
+        assert_eq!(
+            projet.scenario.as_ref().map(|s| s.titre.as_str()),
+            Some("Sujet dicte")
+        );
+        // La decision devra etre re-tranchee.
+        assert_eq!(projet.validation_scenario, None);
+    }
+
+    #[tokio::test]
+    async fn affine_le_scenario_en_mode_auto() {
+        let mut projet = projet_transcrit_avec_scenario();
+        affiner_scenario(
+            &mut projet,
+            &extracteur_factice(),
+            "Raccourcis la video",
+            ModeTransition::Auto,
+        )
+        .await
+        .expect("l'affinage doit aboutir");
+        assert_eq!(
+            projet.validation_scenario,
+            Some(DecisionValidation::Accepte)
+        );
+    }
+
+    #[tokio::test]
+    async fn affiner_refuse_un_projet_hors_transcrit() {
+        let mut projet = projet_transcrit_avec_scenario();
+        projet.etat = EtatPipeline::ScenarioGenere;
+        let resultat = affiner_scenario(
+            &mut projet,
+            &extracteur_factice(),
+            "Raccourcis",
+            ModeTransition::Validation,
+        )
+        .await;
+        match resultat {
+            Err(Error::Pipeline(message)) => {
+                assert!(message.contains("attendu : Transcrit"), "{message}")
+            }
+            autre => panic!("une erreur Pipeline est attendue, pas {autre:?}"),
+        }
     }
 }

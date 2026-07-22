@@ -30,6 +30,11 @@ pub enum Error {
     /// Erreur de logique du pipeline (transition invalide, etape absente).
     #[error("erreur de pipeline : {0}")]
     Pipeline(String),
+
+    /// Etape interrompue par l'utilisateur (`POST /annuler`) : ce n'est pas
+    /// un echec, le projet est reprendable depuis son dernier point stable.
+    #[error("etape annulee par l'utilisateur")]
+    Annulation,
 }
 
 impl Error {

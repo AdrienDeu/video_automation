@@ -8,6 +8,7 @@ video_core.workspace = true
 llm.workspace = true
 tools.workspace = true
 pipeline.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 axum.workspace = true

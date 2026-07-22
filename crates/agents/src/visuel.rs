@@ -6,6 +6,7 @@
 
 use llm::visuel::ImagesChoisies;
 use llm::{Agent, CompletionModel, Prompt};
+use video_core::annulation::{point_de_controle, CancellationToken};
 use video_core::config::Config;
 use video_core::error::Error;
 use video_core::etat::{EtatPipeline, ModeTransition};
@@ -25,11 +26,28 @@ const TOURS_MAX_PAR_SCENE: u32 = 4;
 /// - `Error::Pipeline` si le projet n'est pas dans l'etat attendu, si le
 ///   scenario n'a pas ete accepte, ou si une scene reste sans image.
 /// - `Error::Llm` si une boucle agent/outil echoue.
+/// - `Error::Annulation` si l'annulation est demandee entre deux scenes.
 pub async fn produire_visuels<M: CompletionModel + 'static>(
     projet: &mut Projet,
     agent: &Agent<M>,
     images_choisies: &ImagesChoisies,
     mode: ModeTransition,
+    token: &CancellationToken,
+) -> Result<(), Error> {
+    produire_visuels_avec_consigne(projet, agent, images_choisies, mode, None, token).await
+}
+
+/// Implementation de [`produire_visuels`], avec en option une consigne
+/// d'affinage de l'utilisateur integree a la consigne de chaque scene : elle
+/// guide la regeneration des requetes de recherche d'images (phase 7,
+/// `POST /affiner`).
+pub async fn produire_visuels_avec_consigne<M: CompletionModel + 'static>(
+    projet: &mut Projet,
+    agent: &Agent<M>,
+    images_choisies: &ImagesChoisies,
+    mode: ModeTransition,
+    consigne_affinage: Option<&str>,
+    token: &CancellationToken,
 ) -> Result<(), Error> {
     if projet.etat != EtatPipeline::ScenarioGenere {
         return Err(Error::Pipeline(format!(
@@ -48,14 +66,21 @@ pub async fn produire_visuels<M: CompletionModel + 'static>(
         .ok_or_else(|| Error::Pipeline("projet sans scenario".to_string()))?;
 
     for (index, scene) in scenario.scenes.iter().enumerate() {
-        let consigne = format!(
+        point_de_controle(token)?;
+        let mut consigne = format!(
             "Scene {index} :\n\
              - description visuelle : {}\n\
              - narration : {}\n\
-             Style commun de la video : {}\n\
-             Appelle choisir_image pour illustrer cette scene.",
+             Style commun de la video : {}\n",
             scene.description_visuelle, scene.narration, scenario.style_images
         );
+        if let Some(affinage) = consigne_affinage {
+            consigne.push_str(&format!(
+                "Consigne d'affinage de l'utilisateur, a integrer au choix de \
+                 l'image : {affinage}\n"
+            ));
+        }
+        consigne.push_str("Appelle choisir_image pour illustrer cette scene.");
         agent
             .prompt(consigne)
             .max_turns(TOURS_MAX_PAR_SCENE as usize)
@@ -94,12 +119,46 @@ pub async fn produire_visuels_depuis_config(
     projet: &mut Projet,
     config: &Config,
     mode: ModeTransition,
+    token: &CancellationToken,
 ) -> Result<(), Error> {
+    let (agent, images_choisies) = construire_agent(config, projet)?;
+    produire_visuels(projet, &agent, &images_choisies, mode, token).await
+}
+
+/// Regenere tous les visuels en integrant une consigne d'affinage de
+/// l'utilisateur dans la consigne de chaque scene (phase 7, `POST /affiner`).
+///
+/// # Erreurs
+/// Voir [`produire_visuels_depuis_config`].
+pub async fn affiner_visuels_depuis_config(
+    projet: &mut Projet,
+    config: &Config,
+    mode: ModeTransition,
+    consigne: &str,
+    token: &CancellationToken,
+) -> Result<(), Error> {
+    let (agent, images_choisies) = construire_agent(config, projet)?;
+    produire_visuels_avec_consigne(
+        projet,
+        &agent,
+        &images_choisies,
+        mode,
+        Some(consigne),
+        token,
+    )
+    .await
+}
+
+/// Construit l'agent Visuel et son collecteur d'images pour un projet.
+fn construire_agent(
+    config: &Config,
+    projet: &Projet,
+) -> Result<(llm::visuel::AgentVisuel, ImagesChoisies), Error> {
     let images_choisies: ImagesChoisies = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
     let dossier = config.data_dir.join(&projet.id);
     let outil = llm::visuel::ChoisirImage::nouveau(dossier, images_choisies.clone())?;
     let agent = llm::visuel::construire_agent_visuel_depuis_config(&config.llm, outil)?;
-    produire_visuels(projet, &agent, &images_choisies, mode).await
+    Ok((agent, images_choisies))
 }
 
 /// Remplace l'image d'une scene par une nouvelle recherche (mode validation :
@@ -170,10 +229,12 @@ mod tests {
     use video_core::scenario::{Scenario, Scene};
 
     /// Mock de `CompletionModel` : reponses predefinies consommees dans
-    /// l'ordre (meme principe que `llm/tests/hello_world.rs`).
+    /// l'ordre (meme principe que `llm/tests/hello_world.rs`). Les requetes
+    /// recues sont capturees (format debug) pour verifier les consignes.
     #[derive(Clone, Default)]
     struct ModeleFactice {
         reponses: Arc<Mutex<VecDeque<CompletionResponse<serde_json::Value>>>>,
+        requetes: Arc<Mutex<Vec<String>>>,
     }
 
     impl CompletionModel for ModeleFactice {
@@ -189,6 +250,10 @@ mod tests {
             &self,
             _request: CompletionRequest,
         ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            self.requetes
+                .lock()
+                .expect("mutex non empoisonne")
+                .push(format!("{_request:?}"));
             self.reponses
                 .lock()
                 .expect("mutex non empoisonne")
@@ -315,6 +380,7 @@ mod tests {
         let choisies: ImagesChoisies = Arc::new(Mutex::new(vec![]));
         let agent = AgentBuilder::new(ModeleFactice {
             reponses: Arc::new(Mutex::new(reponses)),
+            requetes: Arc::new(Mutex::new(vec![])),
         })
         .tool(ChoisirImageFactice {
             choisies: choisies.clone(),
@@ -324,13 +390,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn affine_les_visuels_en_integrant_la_consigne() {
+        let mut projet = projet_scenario_accepte(2);
+        // Meme montage que `agent_factice`, avec capture des requetes.
+        let reponses = VecDeque::from(vec![
+            reponse_appel_outil(0),
+            reponse_texte(),
+            reponse_appel_outil(1),
+            reponse_texte(),
+        ]);
+        let requetes: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let choisies: ImagesChoisies = Arc::new(Mutex::new(vec![]));
+        let agent = AgentBuilder::new(ModeleFactice {
+            reponses: Arc::new(Mutex::new(reponses)),
+            requetes: requetes.clone(),
+        })
+        .tool(ChoisirImageFactice {
+            choisies: choisies.clone(),
+        })
+        .build();
+
+        produire_visuels_avec_consigne(
+            &mut projet,
+            &agent,
+            &choisies,
+            ModeTransition::Validation,
+            Some("Plutot des photos de nuit"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("l'affinage doit aboutir");
+
+        assert_eq!(projet.etat, EtatPipeline::VisuelsPrets);
+        assert_eq!(projet.visuels.len(), 2);
+        // Chaque consigne de scene integre la consigne d'affinage.
+        let captures = requetes.lock().expect("mutex non empoisonne");
+        assert!(
+            captures
+                .iter()
+                .any(|r| r.contains("Plutot des photos de nuit")),
+            "la consigne d'affinage doit etre transmise au modele : {captures:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn produit_une_image_par_scene_en_mode_validation() {
         let mut projet = projet_scenario_accepte(2);
         let (agent, choisies) = agent_factice(2);
 
-        produire_visuels(&mut projet, &agent, &choisies, ModeTransition::Validation)
-            .await
-            .expect("la production doit aboutir");
+        produire_visuels(
+            &mut projet,
+            &agent,
+            &choisies,
+            ModeTransition::Validation,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("la production doit aboutir");
 
         assert_eq!(projet.etat, EtatPipeline::VisuelsPrets);
         assert_eq!(projet.visuels.len(), 2);
@@ -345,9 +461,15 @@ mod tests {
         let mut projet = projet_scenario_accepte(1);
         let (agent, choisies) = agent_factice(1);
 
-        produire_visuels(&mut projet, &agent, &choisies, ModeTransition::Auto)
-            .await
-            .expect("la production doit aboutir");
+        produire_visuels(
+            &mut projet,
+            &agent,
+            &choisies,
+            ModeTransition::Auto,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("la production doit aboutir");
 
         assert_eq!(projet.etat, EtatPipeline::VisuelsPrets);
         assert_eq!(projet.validation_visuels, Some(DecisionValidation::Accepte));
@@ -359,8 +481,14 @@ mod tests {
         projet.validation_scenario = None; // scenario pas encore tranche
         let (agent, choisies) = agent_factice(1);
 
-        let resultat =
-            produire_visuels(&mut projet, &agent, &choisies, ModeTransition::Validation).await;
+        let resultat = produire_visuels(
+            &mut projet,
+            &agent,
+            &choisies,
+            ModeTransition::Validation,
+            &CancellationToken::new(),
+        )
+        .await;
         match resultat {
             Err(Error::Pipeline(message)) => {
                 assert!(message.contains("acceptation du scenario"), "{message}")
@@ -382,19 +510,47 @@ mod tests {
         let choisies: ImagesChoisies = Arc::new(Mutex::new(vec![]));
         let agent = AgentBuilder::new(ModeleFactice {
             reponses: Arc::new(Mutex::new(reponses)),
+            requetes: Arc::new(Mutex::new(vec![])),
         })
         .tool(ChoisirImageFactice {
             choisies: choisies.clone(),
         })
         .build();
 
-        let resultat =
-            produire_visuels(&mut projet, &agent, &choisies, ModeTransition::Validation).await;
+        let resultat = produire_visuels(
+            &mut projet,
+            &agent,
+            &choisies,
+            ModeTransition::Validation,
+            &CancellationToken::new(),
+        )
+        .await;
         match resultat {
             Err(Error::Pipeline(message)) => {
                 assert!(message.contains("scene 1"), "{message}")
             }
             autre => panic!("une erreur Pipeline est attendue, pas {autre:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn s_interrompt_avant_la_premiere_scene_si_annule() {
+        let mut projet = projet_scenario_accepte(2);
+        let (agent, choisies) = agent_factice(2);
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let resultat = produire_visuels(
+            &mut projet,
+            &agent,
+            &choisies,
+            ModeTransition::Validation,
+            &token,
+        )
+        .await;
+        assert!(matches!(resultat, Err(Error::Annulation)));
+        // Aucune image choisie, etat d'entree conserve : reprise possible.
+        assert!(choisies.lock().expect("mutex non empoisonne").is_empty());
+        assert_eq!(projet.etat, EtatPipeline::ScenarioGenere);
     }
 }

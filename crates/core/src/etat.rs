@@ -20,6 +20,10 @@ pub enum EtatPipeline {
     MontagePret,
     /// La video est publiee sur YouTube.
     Publie,
+    /// Le traitement a ete interrompu par l'utilisateur (`POST /annuler`) ;
+    /// le point de reprise est derive des livrables deja produits
+    /// (`video_core::annulation::point_de_reprise`, `POST /reprendre`).
+    Annule,
     /// Une etape a echoue ; le detail est conserve pour le Realisateur.
     Erreur(String),
 }

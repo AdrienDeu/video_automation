@@ -5,6 +5,9 @@
 //! Le prompt systeme est versionne ici, dans la facade `llm`, conformement a
 //! l'architecture (§5) : les crates clients ne voient que des fonctions.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use rig_core::client::CompletionClient;
 use rig_core::completion::CompletionModel;
 use rig_core::extractor::{Extractor, ExtractorBuilder};
@@ -78,6 +81,30 @@ pub fn extracteur_sur_modele<M: CompletionModel>(modele: M) -> Extractor<M, Scen
         .build()
 }
 
+/// Futur boxe d'une extraction de scenario : rend le trait object-safe.
+pub type FuturScenario<'a> = Pin<Box<dyn Future<Output = Result<Scenario, Error>> + Send + 'a>>;
+
+/// Abstraction object-safe de l'extraction structuree de scenario.
+///
+/// L'`Extractor` rig concret est utilise en production ; le serveur stocke un
+/// `Arc<dyn ExtracteurScenario>` ce qui permet aux tests HTTP d'injecter un
+/// mock sans reseau (phase 7, `POST /affiner`).
+pub trait ExtracteurScenario: Send + Sync {
+    /// Extrait un `Scenario` structure d'une demande textuelle (transcription
+    /// et, pour l'affinage, scenario actuel et consigne utilisateur).
+    fn extraire(&self, demande: String) -> FuturScenario<'_>;
+}
+
+impl<M: CompletionModel> ExtracteurScenario for Extractor<M, Scenario> {
+    fn extraire(&self, demande: String) -> FuturScenario<'_> {
+        Box::pin(async move {
+            self.extract(demande)
+                .await
+                .map_err(|e| Error::Llm(format!("extraction du scenario : {e}")))
+        })
+    }
+}
+
 /// Genere un scenario a partir d'une transcription STT.
 ///
 /// Le texte integral est transmis au modele ; les segments horodates ne sont
@@ -85,16 +112,43 @@ pub fn extracteur_sur_modele<M: CompletionModel>(modele: M) -> Extractor<M, Scen
 ///
 /// # Erreurs
 /// `Error::Llm` si l'extraction echoue apres les tentatives accordees.
-pub async fn generer_scenario<M: CompletionModel>(
-    extracteur: &Extractor<M, Scenario>,
+pub async fn generer_scenario(
+    extracteur: &dyn ExtracteurScenario,
     transcription: &Transcription,
 ) -> Result<Scenario, Error> {
     let demande = format!(
         "Voici la transcription de la note dictee :\n\n{}",
         transcription.texte
     );
-    extracteur
-        .extract(demande)
-        .await
-        .map_err(|e| Error::Llm(format!("generation du scenario : {e}")))
+    extracteur.extraire(demande).await
+}
+
+/// Regenere un scenario en integrant une consigne d'affinage de
+/// l'utilisateur (phase 7, `POST /affiner`).
+///
+/// La transcription d'origine et le scenario actuel (en JSON) sont fournis au
+/// modele avec la consigne ; le scenario corrige est extrait avec le meme
+/// structured output et les memes tentatives qu'a la generation initiale.
+///
+/// # Erreurs
+/// `Error::Llm` si la serialisation du scenario actuel ou l'extraction
+/// echoue.
+pub async fn affiner_scenario(
+    extracteur: &dyn ExtracteurScenario,
+    transcription: &Transcription,
+    actuel: &Scenario,
+    consigne: &str,
+) -> Result<Scenario, Error> {
+    let actuel_json = serde_json::to_string_pretty(actuel)
+        .map_err(|e| Error::Llm(format!("serialisation du scenario actuel : {e}")))?;
+    let demande = format!(
+        "Voici la transcription de la note dictee :\n\n{}\n\n\
+         Voici le scenario actuellement produit a partir de cette transcription :\n\n\
+         {actuel_json}\n\n\
+         Consigne d'affinage de l'utilisateur : {consigne}\n\n\
+         Produit le scenario complet corrige en integrant cette consigne, sans \
+         trahir la transcription.",
+        transcription.texte
+    );
+    extracteur.extraire(demande).await
 }

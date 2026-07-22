@@ -7,11 +7,8 @@
 // --- Etat local -------------------------------------------------------------
 
 let projetCourant = null; // id du projet affiche dans la zone detail
-let minuteurDetail = null;
-
-// Etats dans lesquels le pipeline peut progresser sans action humaine :
-// seuls ceux-la justifient un rafraichissement automatique du detail.
-const ETATS_EN_COURS = new Set(["audio_recu", "transcrit"]);
+let minuteurDetail = null; // polling de repli si le SSE est indisponible
+let sourceEvenements = null; // EventSource SSE du projet courant
 
 const LIBELLES_ETATS = {
   audio_recu: "Audio recu",
@@ -156,7 +153,7 @@ function renderListe(projets) {
 
 function selectionnerProjet(id) {
   projetCourant = id;
-  chargerDetail();
+  ouvrirSuivi(id);
 }
 
 async function chargerDetail() {
@@ -169,11 +166,45 @@ async function chargerDetail() {
   }
 }
 
-// Rafraichissement automatique : 3 s tant que le pipeline avance seul.
-function gererMinuteur(codeEtat) {
-  if (ETATS_EN_COURS.has(codeEtat) && minuteurDetail === null) {
-    minuteurDetail = setInterval(chargerDetail, 3000);
-  } else if (!ETATS_EN_COURS.has(codeEtat) && minuteurDetail !== null) {
+// Suivi temps reel du projet courant : flux SSE
+// (GET /projet/{id}/events), avec repli sur un polling de 3 s si la
+// connexion est coupee definitivement ou si EventSource est indisponible.
+function ouvrirSuivi(id) {
+  fermerSuivi();
+  if (typeof EventSource === "undefined") {
+    demarrerPolling();
+    return;
+  }
+  sourceEvenements = new EventSource("/projet/" + encodeURIComponent(id) + "/events");
+  sourceEvenements.addEventListener("projet", (evenement) => {
+    try {
+      renderDetail(JSON.parse(evenement.data));
+      rafraichirListe();
+    } catch (erreur) {
+      console.warn("evenement SSE illisible :", erreur);
+    }
+  });
+  sourceEvenements.onerror = () => {
+    // EventSource retente seul tant que readyState n'est pas CLOSED ; une
+    // fermeture definitive (ex. reponse non-SSE) bascule sur le polling.
+    if (sourceEvenements && sourceEvenements.readyState === EventSource.CLOSED) {
+      fermerSuivi();
+      demarrerPolling();
+    }
+  };
+}
+
+function demarrerPolling() {
+  if (minuteurDetail === null) minuteurDetail = setInterval(chargerDetail, 3000);
+  chargerDetail();
+}
+
+function fermerSuivi() {
+  if (sourceEvenements) {
+    sourceEvenements.close();
+    sourceEvenements = null;
+  }
+  if (minuteurDetail !== null) {
     clearInterval(minuteurDetail);
     minuteurDetail = null;
   }
@@ -181,7 +212,6 @@ function gererMinuteur(codeEtat) {
 
 function renderDetail(projet) {
   const info = normaliserEtat(projet.etat);
-  gererMinuteur(info.code);
 
   document.getElementById("zone-detail").hidden = false;
   document.getElementById("detail-titre").textContent = "Projet " + projet.id;
@@ -242,6 +272,46 @@ function renderTranscription(projet) {
   zone.append(el("p", "transcription-texte", projet.transcription.texte));
 }
 
+// --- Affinage (phase 7) -------------------------------------------------------
+
+// Champ « affiner... » + bouton pour une etape deja produite : envoie
+// POST /affiner avec le prompt saisi. Le flux SSE mettra l'interface a jour
+// au fil de la reprise du pipeline.
+function ajouterFormulaireAffinage(zone, id, etape) {
+  const formulaire = el("form", "affinage");
+  const champ = document.createElement("input");
+  champ.type = "text";
+  champ.placeholder = "Affiner " + LIBELLES_ETAPES[etape] + "...";
+  champ.required = true;
+  const bouton = el("button", null, "Affiner");
+  bouton.type = "submit";
+  formulaire.append(champ, bouton);
+  formulaire.addEventListener("submit", (e) => {
+    e.preventDefault();
+    affiner(id, etape, champ.value.trim(), bouton);
+  });
+  zone.append(formulaire);
+}
+
+async function affiner(id, etape, prompt, bouton) {
+  if (!prompt) return;
+  bouton.disabled = true;
+  try {
+    const projet = await postJSON("/affiner", { id, etape, prompt });
+    if (projet) {
+      renderDetail(projet);
+      afficherInfo(
+        "Pipeline relance depuis " + LIBELLES_ETAPES[etape] +
+        " : les etapes impactees sont regenerees.");
+      rafraichirListe();
+    }
+  } catch (erreur) {
+    afficherErreurAction("Affinage impossible : " + erreur.message);
+  } finally {
+    bouton.disabled = false;
+  }
+}
+
 function renderScenario(projet) {
   const zone = document.getElementById("detail-scenario");
   zone.textContent = "";
@@ -269,6 +339,7 @@ function renderScenario(projet) {
     liste.append(item);
   });
   zone.append(liste);
+  ajouterFormulaireAffinage(zone, projet.id, "scenario");
 }
 
 function renderVisuels(projet) {
@@ -319,6 +390,7 @@ function renderVisuels(projet) {
     galerie.append(figure);
   }
   zone.append(galerie);
+  ajouterFormulaireAffinage(zone, projet.id, "visuels");
 }
 
 async function remplacerVisuel(id, scene, requete) {
@@ -358,6 +430,7 @@ function renderVoix(projet) {
     ligne.append(lien);
     zone.append(ligne);
   }
+  ajouterFormulaireAffinage(zone, projet.id, "voix");
 }
 
 // --- Montage ----------------------------------------------------------------
@@ -383,6 +456,7 @@ function renderMontage(projet) {
     ligne.append(lien);
     zone.append(ligne);
   }
+  ajouterFormulaireAffinage(zone, projet.id, "montage");
 }
 
 // --- Publication ------------------------------------------------------------
@@ -462,6 +536,12 @@ function afficherErreurAction(message) {
   const zone = document.getElementById("detail-validation");
   zone.querySelectorAll(".message-erreur").forEach((n) => n.remove());
   zone.append(el("p", "message-erreur", message));
+}
+
+function afficherInfo(message) {
+  const zone = document.getElementById("detail-validation");
+  zone.querySelectorAll(".message-info").forEach((n) => n.remove());
+  zone.append(el("p", "message-info", message));
 }
 
 // --- Demarrage --------------------------------------------------------------

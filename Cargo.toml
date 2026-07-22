@@ -23,6 +23,7 @@ pipeline = { path = "crates/pipeline" }
 
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio-util = "0.7"
 thiserror = "2"
 figment = { version = "0.10", features = ["toml", "env"] }
 anyhow = "1"

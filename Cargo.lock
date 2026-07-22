@@ -2018,6 +2018,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tools",
  "tower",
  "uuid",
@@ -2394,6 +2395,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -2719,6 +2721,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio-util",
 ]
 
 [[package]]

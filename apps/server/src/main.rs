@@ -13,10 +13,19 @@
 //! fichiers du projet (`GET /projet/{id}/fichier/{nom}`).
 //! Phase 6 : publication YouTube par l'agent Publieur une fois le montage
 //! accepte (si les identifiants OAuth sont configures).
+//! Phase 7 : affinage d'une etape avec propagation en aval (`POST /affiner`)
+//! et suivi temps reel de l'etat d'un projet en SSE
+//! (`GET /projet/{id}/events`).
+//! Phase 8 : annulation a n'importe quelle etape (`POST /annuler`) et reprise
+//! (`POST /reprendre`). Les etapes s'executent en tache de fond (module
+//! `tache`), interruptibles via un `CancellationToken` par projet ; les POST
+//! declencheurs (`/audio`, `/valider`, `/affiner`) repondent des l'etat
+//! courant persiste, sans attendre la fin du traitement.
 
 mod audio;
 mod handlers;
 mod store;
+mod tache;
 mod ui;
 
 use std::sync::Arc;
@@ -39,6 +48,18 @@ pub struct AppState {
     pub youtube: Option<agents::publieur::ContextePublication>,
     /// Persistance SQLite des projets.
     pub stockage: Stockage,
+    /// Extracteur du Scenariste construit au demarrage ; `None` sans cle API
+    /// Mistral. Trait object pour permettre l'injection d'un mock dans les
+    /// tests (phase 7).
+    pub scenariste: Option<Arc<dyn llm::scenariste::ExtracteurScenario>>,
+    /// Notifications de changement d'etat des projets (SSE, phase 7) : chaque
+    /// sauvegarde d'un projet y publie l'identifiant du projet modifie.
+    pub evenements: tokio::sync::broadcast::Sender<String>,
+    /// Tokens d'annulation des taches de pipeline en cours, par identifiant
+    /// de projet (phase 8) : `POST /annuler` y puise le token a declencher,
+    /// `tache::lancer_pipeline` l'y inscrit puis le retire en fin de tache.
+    pub taches:
+        std::sync::Mutex<std::collections::HashMap<String, video_core::annulation::CancellationToken>>,
 }
 
 /// Construit le routeur de l'application (isole de `main` pour les tests).
@@ -51,9 +72,13 @@ fn construire_routeur(etat: Arc<AppState>) -> Router {
         .route("/audio", post(handlers::post_audio))
         .route("/projets", get(handlers::get_projets))
         .route("/projet/{id}", get(handlers::get_projet))
+        .route("/projet/{id}/events", get(handlers::get_projet_events))
         .route("/projet/{id}/fichier/{nom}", get(handlers::get_fichier))
         .route("/valider", post(handlers::post_valider))
         .route("/visuel/remplacer", post(handlers::post_remplacer_visuel))
+        .route("/affiner", post(handlers::post_affiner))
+        .route("/annuler", post(handlers::post_annuler))
+        .route("/reprendre", post(handlers::post_reprendre))
         .with_state(etat)
 }
 
@@ -67,11 +92,25 @@ async fn main() -> Result<(), Error> {
 
     let stockage = Stockage::ouvrir(&config.data_dir).await?;
     let youtube = agents::publieur::ContextePublication::depuis_environnement(&config.data_dir);
+    let cle_api = config::cle_api_mistral();
+    // Extracteur du Scenariste construit une fois au demarrage ; absent sans
+    // cle API (les etapes LLM sont alors desactivees, cf. l'avertissement).
+    let scenariste = if cle_api.is_some() {
+        llm::scenariste::construire_extracteur_scenario_depuis_config(&config.llm)
+            .ok()
+            .map(|extracteur| Arc::new(extracteur) as Arc<dyn llm::scenariste::ExtracteurScenario>)
+    } else {
+        None
+    };
+    let (evenements, _) = tokio::sync::broadcast::channel(64);
     let etat = Arc::new(AppState {
-        cle_api: config::cle_api_mistral(),
+        cle_api,
         youtube,
         config,
         stockage,
+        scenariste,
+        evenements,
+        taches: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
     if etat.cle_api.is_none() {
         eprintln!("attention : MISTRAL_API_KEY absente, transcription et scenario sont desactives");

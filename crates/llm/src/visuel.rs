@@ -110,13 +110,18 @@ impl Tool for ChoisirImage {
     }
 }
 
+/// Agent Visuel concret (modele Mistral), tel que construit par
+/// [`construire_agent_visuel`] : alias public pour que les crates clients
+/// nomment le type sans dependre de `rig-core`.
+pub type AgentVisuel = rig_core::agent::Agent<rig_core::providers::mistral::CompletionModel>;
+
 /// Construit l'agent Visuel adosse a l'API Mistral, muni de l'outil
 /// `choisir_image` et du prompt dedie.
 pub fn construire_agent_visuel(
     cle_api: &str,
     modele: &str,
     outil: ChoisirImage,
-) -> Result<rig_core::agent::Agent<rig_core::providers::mistral::CompletionModel>, Error> {
+) -> Result<AgentVisuel, Error> {
     Ok(client::construire_agent_mistral(cle_api, modele)?
         .preamble(PREAMBLE_VISUEL)
         .tool(outil)
@@ -131,7 +136,7 @@ pub fn construire_agent_visuel(
 pub fn construire_agent_visuel_depuis_config(
     config_llm: &LlmConfig,
     outil: ChoisirImage,
-) -> Result<rig_core::agent::Agent<rig_core::providers::mistral::CompletionModel>, Error> {
+) -> Result<AgentVisuel, Error> {
     match config_llm.provider {
         Provider::Mistral => {
             let cle = video_core::config::cle_api_mistral().ok_or_else(|| {

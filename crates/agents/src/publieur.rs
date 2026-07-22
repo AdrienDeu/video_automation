@@ -59,11 +59,14 @@ impl ContextePublication {
 ///   montage n'a pas ete accepte, si la video est absente, ou si le quota
 ///   journalier est atteint.
 /// - `Error::Tool` si l'echange OAuth ou l'upload echoue.
+/// - `Error::Annulation` si l'annulation est demandee entre deux chunks
+///   d'upload.
 pub async fn produire_publication(
     projet: &mut Projet,
     config: &Config,
     stockage: &Stockage,
     contexte: &ContextePublication,
+    token: &video_core::annulation::CancellationToken,
 ) -> Result<(), Error> {
     if projet.etat != EtatPipeline::MontagePret {
         return Err(Error::Pipeline(format!(
@@ -95,7 +98,8 @@ pub async fn produire_publication(
     let http = youtube::client_http()?;
     let jeton = youtube::rafraichir_token(&http, &contexte.endpoints, &contexte.secrets).await?;
     let id_video =
-        youtube::publier_video(&http, &contexte.endpoints, &jeton, &metadonnees, &chemin).await?;
+        youtube::publier_video(&http, &contexte.endpoints, &jeton, &metadonnees, &chemin, token)
+            .await?;
     stockage.incrementer_uploads().await?;
 
     projet.youtube = Some(PublicationYoutube {
@@ -271,9 +275,15 @@ mod tests {
         std::fs::create_dir_all(&dossier).expect("dossier projet");
         std::fs::write(dossier.join("video.mp4"), b"fausse video").expect("video");
 
-        produire_publication(&mut projet, &config, &stockage, &contexte)
-            .await
-            .expect("la publication doit aboutir");
+        produire_publication(
+            &mut projet,
+            &config,
+            &stockage,
+            &contexte,
+            &video_core::annulation::CancellationToken::new(),
+        )
+        .await
+        .expect("la publication doit aboutir");
 
         assert_eq!(projet.etat, EtatPipeline::Publie);
         let publication = projet.youtube.expect("publication consignee");
@@ -298,7 +308,14 @@ mod tests {
         stockage.incrementer_uploads().await.expect("increment");
         let mut projet = projet_montage_accepte();
 
-        let resultat = produire_publication(&mut projet, &config, &stockage, &contexte).await;
+        let resultat = produire_publication(
+            &mut projet,
+            &config,
+            &stockage,
+            &contexte,
+            &video_core::annulation::CancellationToken::new(),
+        )
+        .await;
         match resultat {
             Err(Error::Pipeline(message)) => {
                 assert!(message.contains("quota"), "{message}");
@@ -322,7 +339,14 @@ mod tests {
         let mut projet = projet_montage_accepte();
         projet.etat = EtatPipeline::VoixPretes;
 
-        let resultat = produire_publication(&mut projet, &config, &stockage, &contexte).await;
+        let resultat = produire_publication(
+            &mut projet,
+            &config,
+            &stockage,
+            &contexte,
+            &video_core::annulation::CancellationToken::new(),
+        )
+        .await;
         match resultat {
             Err(Error::Pipeline(message)) => assert!(message.contains("MontagePret"), "{message}"),
             autre => panic!("une erreur Pipeline est attendue, pas {autre:?}"),
@@ -338,7 +362,14 @@ mod tests {
         let mut projet = projet_montage_accepte();
         projet.validation_montage = None; // montage pas encore tranche
 
-        let resultat = produire_publication(&mut projet, &config, &stockage, &contexte).await;
+        let resultat = produire_publication(
+            &mut projet,
+            &config,
+            &stockage,
+            &contexte,
+            &video_core::annulation::CancellationToken::new(),
+        )
+        .await;
         match resultat {
             Err(Error::Pipeline(message)) => {
                 assert!(message.contains("acceptation du montage"), "{message}")
@@ -356,7 +387,14 @@ mod tests {
         let mut projet = projet_montage_accepte();
         projet.video = None;
 
-        let resultat = produire_publication(&mut projet, &config, &stockage, &contexte).await;
+        let resultat = produire_publication(
+            &mut projet,
+            &config,
+            &stockage,
+            &contexte,
+            &video_core::annulation::CancellationToken::new(),
+        )
+        .await;
         assert!(matches!(resultat, Err(Error::Pipeline(_))));
     }
 }

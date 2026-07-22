@@ -265,6 +265,9 @@ pub async fn monter(
     let resultat = tokio::process::Command::new("ffmpeg")
         .args(&args)
         .current_dir(dossier)
+        // Tue le process si la future est abandonnee (annulation du montage
+        // via `tokio::select!` cote Monteur).
+        .kill_on_drop(true)
         .output()
         .await
         .map_err(|e| Error::Tool(format!("lancement de ffmpeg : {e}")))?;

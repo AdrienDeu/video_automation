@@ -9,6 +9,7 @@ serde_json = "1"
 thiserror.workspace = true
 figment.workspace = true
 schemars.workspace = true
+tokio-util.workspace = true
 
 [dev-dependencies]
 serde_json = "1"

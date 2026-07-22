@@ -19,15 +19,19 @@ use video_core::projet::Transcription;
 
 /// Mock du trait `CompletionModel` de rig (meme principe que
 /// `tests/hello_world.rs`) : reponses predefinies consommees dans l'ordre.
+/// Les requetes recues sont capturees (format debug) pour verifier le contenu
+/// des demandes.
 #[derive(Clone, Default)]
 struct ModeleFactice {
     reponses: Arc<Mutex<VecDeque<CompletionResponse<serde_json::Value>>>>,
+    requetes: Arc<Mutex<Vec<String>>>,
 }
 
 impl ModeleFactice {
     fn avec_reponses(reponses: Vec<CompletionResponse<serde_json::Value>>) -> Self {
         Self {
             reponses: Arc::new(Mutex::new(reponses.into())),
+            requetes: Arc::new(Mutex::new(vec![])),
         }
     }
 }
@@ -45,6 +49,10 @@ impl CompletionModel for ModeleFactice {
         &self,
         _request: CompletionRequest,
     ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+        self.requetes
+            .lock()
+            .expect("mutex non empoisonne")
+            .push(format!("{_request:?}"));
         self.reponses
             .lock()
             .expect("mutex non empoisonne")
@@ -141,11 +149,53 @@ async fn extraction_echoue_sans_appel_submit() {
     let resultat = scenariste::generer_scenario(&extracteur, &transcription_fixture()).await;
     match resultat {
         Err(erreur) => assert!(
-            erreur.to_string().contains("generation du scenario"),
+            erreur.to_string().contains("extraction du scenario"),
             "l'erreur doit etre contextualisee : {erreur}"
         ),
         Ok(_) => panic!("l'extraction sans appel a submit doit echouer"),
     }
+}
+
+#[tokio::test]
+async fn affinage_scenario_integre_existant_et_consigne() {
+    let modele = ModeleFactice::avec_reponses(vec![reponse_submit(scenario_json())]);
+    let requetes = modele.requetes.clone();
+    let extracteur = scenariste::extracteur_sur_modele(modele);
+
+    let actuel = scenariste::generer_scenario(
+        &scenariste::extracteur_sur_modele(ModeleFactice::avec_reponses(vec![reponse_submit(
+            scenario_json(),
+        )])),
+        &transcription_fixture(),
+    )
+    .await
+    .expect("extraction du scenario actuel");
+    let scenario = scenariste::affiner_scenario(
+        &extracteur,
+        &transcription_fixture(),
+        &actuel,
+        "Raccourcis la video a deux scenes",
+    )
+    .await
+    .expect("l'affinage doit aboutir");
+
+    assert_eq!(scenario.titre, "La photosynthese");
+    // La demande contient la transcription, le scenario actuel et la consigne.
+    let captures = requetes.lock().expect("mutex non empoisonne");
+    assert_eq!(captures.len(), 1, "une seule extraction : {captures:?}");
+    let demande = &captures[0];
+    assert!(
+        demande.contains("photosynthese a des collegiens"),
+        "transcription presente : {demande}"
+    );
+    assert!(
+        demande.contains("photos macro, tons verts"),
+        "scenario actuel present : {demande}"
+    );
+    assert!(
+        demande.contains("Raccourcis la video a deux scenes"),
+        "consigne presente : {demande}"
+    );
 }
 
 /// Verification locale contre la vraie API Mistral : ignoree silencieusement

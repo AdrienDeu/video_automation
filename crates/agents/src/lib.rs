@@ -1,8 +1,12 @@
 //! Agents specialises (Realisateur, Scenariste, Visuel, Conteur, Monteur).
 //!
 //! Phase 2 : le Realisateur v1 orchestre l'enchainement transcription →
-//! scenario. Le Scenariste vit dans la facade `llm` (`llm::scenariste`) :
-//! ce n'est qu'une extraction structuree, sans boucle d'outils propre.
-//! Les agents Visuel, Conteur et Monteur arrivent en phases 3 a 5.
+//! scenario. Phase 3 : le Visuel illustre chaque scene validee avec une image
+//! licenciee. Phase 4 : le Conteur double chaque scene d'une voix off
+//! synthetisee et ecrit les sous-titres. Le Scenariste vit dans la facade
+//! `llm` (`llm::scenariste`) : ce n'est qu'une extraction structuree, sans
+//! boucle d'outils propre. L'agent Monteur arrive en phase 5.
 
+pub mod conteur;
 pub mod realisateur;
+pub mod visuel;

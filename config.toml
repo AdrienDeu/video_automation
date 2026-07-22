@@ -13,3 +13,14 @@ duree_max_secondes = 1800
 # Mode de la transition apres generation du scenario : "validation" (defaut,
 # relecture humaine) ou "auto".
 scenario = "validation"
+# Mode de la transition apres choix des visuels.
+visuels = "validation"
+# Mode de la transition apres generation des voix.
+voix = "validation"
+
+[voix]
+# Endpoint TTS (compatible OpenAI /v1/audio/speech ; hypothese phase 4,
+# l'API Voxtral TTS n'etant pas figee publiquement).
+url = "https://api.mistral.ai/v1/audio/speech"
+modele = "voxtral-mini-tts"
+voix = "default"

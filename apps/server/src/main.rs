@@ -5,6 +5,8 @@
 //! Phase 2 : generation du scenario par l'agent Scenariste apres le STT,
 //! persistance SQLite (`pipeline::stockage`) et validation humaine du
 //! scenario (`POST /valider`).
+//! Phase 3 : choix des visuels licencies par l'agent Visuel.
+//! Phase 4 : voix off et sous-titres `.srt` par l'agent Conteur.
 
 mod audio;
 mod handlers;
@@ -36,6 +38,7 @@ fn construire_routeur(etat: Arc<AppState>) -> Router {
         .route("/audio", post(handlers::post_audio))
         .route("/projet/{id}", get(handlers::get_projet))
         .route("/valider", post(handlers::post_valider))
+        .route("/visuel/remplacer", post(handlers::post_remplacer_visuel))
         .with_state(etat)
 }
 

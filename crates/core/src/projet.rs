@@ -25,6 +25,23 @@ pub struct Projet {
     /// Decision de validation humaine du scenario (`None` tant que la
     /// transition sortante, en mode `validation`, n'a pas ete tranchee).
     pub validation_scenario: Option<DecisionValidation>,
+    /// Images licenciees choisies par le Visuel, une par scene, presentes une
+    /// fois l'etat `VisuelsPrets` atteint.
+    #[serde(default)]
+    pub visuels: Vec<crate::asset::Asset>,
+    /// Decision de validation humaine des visuels.
+    #[serde(default)]
+    pub validation_visuels: Option<DecisionValidation>,
+    /// Voix off generees par le Conteur, une par scene et par langue,
+    /// presentes une fois l'etat `VoixPretes` atteint.
+    #[serde(default)]
+    pub voix: Vec<crate::voix::VoixScene>,
+    /// Fichiers de sous-titres `.srt` generes par le Conteur, un par langue.
+    #[serde(default)]
+    pub sous_titres: Vec<String>,
+    /// Decision de validation humaine des voix.
+    #[serde(default)]
+    pub validation_voix: Option<DecisionValidation>,
 }
 
 /// Decision prise par l'utilisateur sur une etape en mode `validation`.
@@ -47,6 +64,11 @@ impl Projet {
             transcription: None,
             scenario: None,
             validation_scenario: None,
+            visuels: Vec::new(),
+            validation_visuels: None,
+            voix: Vec::new(),
+            sous_titres: Vec::new(),
+            validation_voix: None,
         }
     }
 }

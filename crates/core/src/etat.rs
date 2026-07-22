@@ -25,12 +25,15 @@ pub enum EtatPipeline {
 }
 
 /// Mode de transition entre deux etats du pipeline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Defaut prudent : `Validation` (relecture humaine).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModeTransition {
     /// La transition s'enchaine sans intervention humaine.
     Auto,
     /// Le pipeline bloque en attente d'une validation utilisateur.
+    #[default]
     Validation,
 }
 

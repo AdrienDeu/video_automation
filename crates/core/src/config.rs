@@ -31,6 +31,9 @@ pub struct Config {
     /// Modes de transition du pipeline (phase 2).
     #[serde(default)]
     pub pipeline: PipelineConfig,
+    /// Configuration du TTS (phase 4).
+    #[serde(default)]
+    pub voix: VoixConfig,
 }
 
 /// Configuration du fournisseur LLM.
@@ -69,6 +72,32 @@ impl Default for AudioConfig {
     }
 }
 
+/// Configuration du TTS (outil `generer_voix`, phase 4).
+///
+/// L'endpoint est configurable : la forme exacte de l'API Voxtral TTS
+/// (`voxtral-mini-tts`) n'etait pas figee publiquement au moment de la phase
+/// 4 ; le client suppose un endpoint compatible OpenAI `POST
+/// /v1/audio/speech` (JSON en entree, octets audio en sortie).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoixConfig {
+    /// URL de l'endpoint TTS.
+    pub url: String,
+    /// Modele TTS, ex. `voxtral-mini-tts`.
+    pub modele: String,
+    /// Voix utilisee pour la narration.
+    pub voix: String,
+}
+
+impl Default for VoixConfig {
+    fn default() -> Self {
+        Self {
+            url: "https://api.mistral.ai/v1/audio/speech".to_string(),
+            modele: "voxtral-mini-tts".to_string(),
+            voix: "default".to_string(),
+        }
+    }
+}
+
 /// Modes de transition du pipeline (voir `docs/architecture.md` §8).
 ///
 /// Chaque etape sensible peut etre `auto` (le pipeline enchaine) ou
@@ -76,14 +105,23 @@ impl Default for AudioConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PipelineConfig {
     /// Mode de la transition qui suit la generation du scenario.
+    #[serde(default)]
     pub scenario: ModeTransition,
+    /// Mode de la transition qui suit le choix des visuels.
+    #[serde(default)]
+    pub visuels: ModeTransition,
+    /// Mode de la transition qui suit la generation des voix.
+    #[serde(default)]
+    pub voix: ModeTransition,
 }
 
 impl Default for PipelineConfig {
     fn default() -> Self {
-        // Defaut prudent : le scenario est toujours relu par un humain.
+        // Defaut prudent : scenario, visuels et voix sont relus par un humain.
         Self {
             scenario: ModeTransition::Validation,
+            visuels: ModeTransition::Validation,
+            voix: ModeTransition::Validation,
         }
     }
 }
@@ -101,6 +139,7 @@ impl Config {
             },
             audio: AudioConfig::default(),
             pipeline: PipelineConfig::default(),
+            voix: VoixConfig::default(),
         }
     }
 
@@ -212,6 +251,7 @@ mod tests {
             .expect("le TOML sans [pipeline] doit etre valide");
         assert_eq!(config.pipeline, PipelineConfig::default());
         assert_eq!(config.pipeline.scenario, ModeTransition::Validation);
+        assert_eq!(config.pipeline.voix, ModeTransition::Validation);
 
         // Avec une section [pipeline] explicite.
         let toml = format!("{toml}\n[pipeline]\nscenario = \"auto\"\n");
@@ -219,5 +259,33 @@ mod tests {
             .extract()
             .expect("le TOML avec [pipeline] doit etre valide");
         assert_eq!(config.pipeline.scenario, ModeTransition::Auto);
+    }
+
+    #[test]
+    fn section_voix_optionnelle() {
+        // Sans section [voix] : endpoint, modele et voix par defaut.
+        let toml = r#"
+            data_dir = "data"
+            server_addr = "127.0.0.1:8080"
+
+            [llm]
+            provider = "mistral"
+            model = "mistral-large-latest"
+        "#;
+        let config: Config = Figment::from(Toml::string(toml))
+            .extract()
+            .expect("le TOML sans [voix] doit etre valide");
+        assert_eq!(config.voix, VoixConfig::default());
+
+        // Avec une section [voix] explicite (endpoint TTS interchangeable).
+        let toml = format!(
+            "{toml}\n[voix]\nurl = \"http://127.0.0.1:5000/tts\"\nmodele = \"piper\"\nvoix = \"alice\"\n"
+        );
+        let config: Config = Figment::from(Toml::string(&toml))
+            .extract()
+            .expect("le TOML avec [voix] doit etre valide");
+        assert_eq!(config.voix.url, "http://127.0.0.1:5000/tts");
+        assert_eq!(config.voix.modele, "piper");
+        assert_eq!(config.voix.voix, "alice");
     }
 }

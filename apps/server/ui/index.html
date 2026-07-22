@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Studio video</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>Studio video</h1>
+    <p class="sous-titre">De la dictee a la video educative</p>
+  </header>
+  <main>
+    <section id="zone-upload" class="carte">
+      <h2>Nouveau projet</h2>
+      <form id="form-upload">
+        <label>
+          Fichier audio
+          <input type="file" id="champ-audio" name="audio" accept="audio/*" required>
+        </label>
+        <label>
+          Langue (optionnel, ex. fr)
+          <input type="text" id="champ-langue" name="langue" maxlength="12" placeholder="fr">
+        </label>
+        <button type="submit" id="bouton-upload">Envoyer</button>
+      </form>
+      <p id="statut-upload" class="statut" hidden></p>
+    </section>
+
+    <section id="zone-liste" class="carte">
+      <h2>Projets</h2>
+      <ul id="liste-projets"></ul>
+      <p id="liste-vide" class="statut" hidden>Aucun projet pour le moment.</p>
+    </section>
+
+    <section id="zone-detail" class="carte" hidden>
+      <h2 id="detail-titre">Detail du projet</h2>
+      <div id="detail-etat"></div>
+      <div id="detail-transcription"></div>
+      <div id="detail-scenario"></div>
+      <div id="detail-visuels"></div>
+      <div id="detail-voix"></div>
+      <div id="detail-validation"></div>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

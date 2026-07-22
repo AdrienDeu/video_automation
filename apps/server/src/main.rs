@@ -7,10 +7,14 @@
 //! scenario (`POST /valider`).
 //! Phase 3 : choix des visuels licencies par l'agent Visuel.
 //! Phase 4 : voix off et sous-titres `.srt` par l'agent Conteur.
+//! Phase 5 : interface web embarquee (`GET /`) : envoi d'audio, liste des
+//! projets (`GET /projets`), suivi et validation par etape, service des
+//! fichiers du projet (`GET /projet/{id}/fichier/{nom}`).
 
 mod audio;
 mod handlers;
 mod store;
+mod ui;
 
 use std::sync::Arc;
 
@@ -35,8 +39,13 @@ pub struct AppState {
 fn construire_routeur(etat: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/", get(ui::get_index))
+        .route("/app.js", get(ui::get_app_js))
+        .route("/style.css", get(ui::get_style_css))
         .route("/audio", post(handlers::post_audio))
+        .route("/projets", get(handlers::get_projets))
         .route("/projet/{id}", get(handlers::get_projet))
+        .route("/projet/{id}/fichier/{nom}", get(handlers::get_fichier))
         .route("/valider", post(handlers::post_valider))
         .route("/visuel/remplacer", post(handlers::post_remplacer_visuel))
         .with_state(etat)

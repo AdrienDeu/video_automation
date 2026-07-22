@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use axum::extract::{Multipart, Path, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::Json;
+use pipeline::stockage::ProjetResume;
 use serde::Deserialize;
 use uuid::Uuid;
 use video_core::error::Error;
@@ -207,6 +208,18 @@ pub async fn post_audio(
     }
 }
 
+/// `GET /projets` : liste legere des projets (id, etat, date de mise a jour),
+/// du plus recent au plus ancien, pour l'interface web.
+pub async fn get_projets(
+    State(etat): State<Arc<AppState>>,
+) -> Result<Json<Vec<ProjetResume>>, ErreurHttp> {
+    etat.stockage
+        .lister()
+        .await
+        .map(Json)
+        .map_err(|e| erreur_interne("liste des projets", e))
+}
+
 /// `GET /projet/{id}` : renvoie l'etat d'un projet (transcription, scenario,
 /// decision de validation... selon son avancement).
 pub async fn get_projet(
@@ -223,6 +236,52 @@ pub async fn get_projet(
         Ok(Some(projet)) => Ok(Json(projet)),
         Ok(None) => Err((StatusCode::NOT_FOUND, format!("projet inconnu : {id}"))),
         Err(e) => Err(erreur_interne("lecture du projet", e)),
+    }
+}
+
+/// `GET /projet/{id}/fichier/{nom}` : sert un fichier du dossier du projet
+/// (images, voix, sous-titres) pour l'interface web.
+///
+/// Le nom doit etre un simple nom de fichier : tout separateur de chemin ou
+/// `..` est rejete (`400`), comme les identifiants invalides. Un fichier
+/// absent renvoie `404`.
+pub async fn get_fichier(
+    State(etat): State<Arc<AppState>>,
+    Path((id, nom)): Path<(String, String)>,
+) -> Result<([(header::HeaderName, &'static str); 1], Vec<u8>), ErreurHttp> {
+    if !store::id_valide(&id) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "identifiant de projet invalide".to_string(),
+        ));
+    }
+    if nom.is_empty() || nom.contains(['/', '\\']) || nom.contains("..") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "nom de fichier invalide".to_string(),
+        ));
+    }
+    let chemin = store::dossier_projet(&etat.config.data_dir, &id).join(&nom);
+    let octets = tokio::fs::read(&chemin).await.map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => (StatusCode::NOT_FOUND, format!("fichier inconnu : {nom}")),
+        _ => erreur_interne("lecture du fichier", e),
+    })?;
+    Ok(([(header::CONTENT_TYPE, type_mime(&nom))], octets))
+}
+
+/// Content-Type deduit de l'extension du fichier servi.
+fn type_mime(nom: &str) -> &'static str {
+    let extension = nom.rsplit('.').next().unwrap_or("").to_lowercase();
+    match extension.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "srt" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
     }
 }
 
@@ -792,5 +851,183 @@ mod tests {
             .await
             .expect("reponse");
         assert_eq!(reponse.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_projets_liste_les_projets_semes() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+        semer_projet_scenario(temp.path()).await;
+        let stockage = Stockage::ouvrir(temp.path()).await.expect("ouverture");
+        stockage
+            .sauvegarder(&Projet::nouveau("autreprojet"))
+            .await
+            .expect("persistance");
+
+        let reponse = app
+            .oneshot(
+                Request::get("/projets")
+                    .body(Body::empty())
+                    .expect("construction de la requete"),
+            )
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::OK);
+        let octets = reponse
+            .into_body()
+            .collect()
+            .await
+            .expect("lecture du corps")
+            .to_bytes();
+        let resumes: Vec<serde_json::Value> =
+            serde_json::from_slice(&octets).expect("corps JSON valide");
+        assert_eq!(resumes.len(), 2);
+        let ids: Vec<&str> = resumes
+            .iter()
+            .map(|r| r["id"].as_str().expect("id texte"))
+            .collect();
+        assert!(ids.contains(&"projetscenario"));
+        assert!(ids.contains(&"autreprojet"));
+        let scenario = resumes
+            .iter()
+            .find(|r| r["id"] == "projetscenario")
+            .expect("resume present");
+        assert_eq!(scenario["etat"], "scenario_genere");
+        assert!(scenario["maj"].as_str().expect("maj texte").len() > 10);
+    }
+
+    #[tokio::test]
+    async fn get_fichier_sert_un_fichier_du_projet() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+        semer_projet_visuels(temp.path()).await;
+        let image = [0xFF, 0xD8, 0xFF, 0xD9]; // en-tete/pied JPEG minimaux
+        let dossier = temp.path().join("projetscenario");
+        tokio::fs::create_dir_all(&dossier)
+            .await
+            .expect("creation du dossier du projet");
+        tokio::fs::write(dossier.join("scene-0.jpg"), image)
+            .await
+            .expect("ecriture de l'image");
+
+        let reponse = app
+            .oneshot(
+                Request::get("/projet/projetscenario/fichier/scene-0.jpg")
+                    .body(Body::empty())
+                    .expect("construction de la requete"),
+            )
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::OK);
+        assert_eq!(
+            reponse.headers()["content-type"],
+            axum::http::HeaderValue::from_static("image/jpeg")
+        );
+        let octets = reponse
+            .into_body()
+            .collect()
+            .await
+            .expect("lecture du corps")
+            .to_bytes();
+        assert_eq!(&octets[..], &image);
+    }
+
+    #[tokio::test]
+    async fn get_fichier_inconnu_renvoie_404() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+        semer_projet_scenario(temp.path()).await;
+
+        let reponse = app
+            .oneshot(
+                Request::get("/projet/projetscenario/fichier/absent.jpg")
+                    .body(Body::empty())
+                    .expect("construction de la requete"),
+            )
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_fichier_refuse_la_traversee_de_repertoire() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+        semer_projet_scenario(temp.path()).await;
+
+        let reponse = app
+            .clone()
+            .oneshot(
+                Request::get("/projet/projetscenario/fichier/..%2F..%2Fsecret.txt")
+                    .body(Body::empty())
+                    .expect("construction de la requete"),
+            )
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::BAD_REQUEST);
+
+        let reponse = app
+            .oneshot(
+                Request::get("/projet/pas%20un%20id/fichier/scene-0.jpg")
+                    .body(Body::empty())
+                    .expect("construction de la requete"),
+            )
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn l_interface_est_servie_a_la_racine() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+
+        let reponse = app
+            .clone()
+            .oneshot(
+                Request::get("/")
+                    .body(Body::empty())
+                    .expect("construction de la requete"),
+            )
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::OK);
+        let html = reponse
+            .into_body()
+            .collect()
+            .await
+            .expect("lecture du corps")
+            .to_bytes();
+        let html = String::from_utf8(html.to_vec()).expect("html en utf-8");
+        assert!(html.contains("zone-upload"));
+
+        let reponse = app
+            .clone()
+            .oneshot(
+                Request::get("/app.js")
+                    .body(Body::empty())
+                    .expect("construction de la requete"),
+            )
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::OK);
+        assert!(reponse.headers()["content-type"]
+            .to_str()
+            .expect("content-type lisible")
+            .starts_with("text/javascript"));
+
+        let reponse = app
+            .oneshot(
+                Request::get("/style.css")
+                    .body(Body::empty())
+                    .expect("construction de la requete"),
+            )
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::OK);
+        assert!(reponse.headers()["content-type"]
+            .to_str()
+            .expect("content-type lisible")
+            .starts_with("text/css"));
     }
 }

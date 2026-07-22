@@ -1,0 +1,275 @@
+/* Interface web du pipeline video : sobre, sans framework. */
+
+:root {
+  --fond: #f4f5f7;
+  --carte: #ffffff;
+  --texte: #1f2430;
+  --meta: #667085;
+  --bordure: #d9dde3;
+  --accent: #2563eb;
+  --erreur: #b42318;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--fond);
+  color: var(--texte);
+  line-height: 1.5;
+}
+
+header {
+  background: var(--carte);
+  border-bottom: 1px solid var(--bordure);
+  padding: 1rem 2rem;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 1.4rem;
+}
+
+.sous-titre {
+  margin: 0.2rem 0 0;
+  color: var(--meta);
+  font-size: 0.9rem;
+}
+
+main {
+  max-width: 900px;
+  margin: 1.5rem auto;
+  padding: 0 1rem;
+  display: grid;
+  gap: 1.5rem;
+}
+
+.carte {
+  background: var(--carte);
+  border: 1px solid var(--bordure);
+  border-radius: 8px;
+  padding: 1.25rem;
+}
+
+.carte h2 {
+  margin-top: 0;
+  font-size: 1.1rem;
+}
+
+.carte h3 {
+  margin: 1.25rem 0 0.5rem;
+  font-size: 1rem;
+  border-top: 1px solid var(--bordure);
+  padding-top: 1rem;
+}
+
+/* --- Upload --- */
+
+#form-upload {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: end;
+}
+
+#form-upload label {
+  display: grid;
+  gap: 0.3rem;
+  font-size: 0.9rem;
+  color: var(--meta);
+}
+
+button {
+  font: inherit;
+  padding: 0.45rem 1rem;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.statut {
+  color: var(--meta);
+  font-size: 0.9rem;
+}
+
+/* --- Liste des projets --- */
+
+#liste-projets {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.projet-bouton {
+  width: 100%;
+  display: flex;
+  gap: 1rem;
+  align-items: baseline;
+  background: none;
+  border: 1px solid var(--bordure);
+  color: var(--texte);
+  text-align: left;
+}
+
+.projet-bouton:hover {
+  border-color: var(--accent);
+}
+
+.projet.actif .projet-bouton {
+  border-color: var(--accent);
+  background: #eff4ff;
+}
+
+.projet-id {
+  font-family: ui-monospace, monospace;
+}
+
+.projet-etat {
+  flex: 1;
+}
+
+.projet-date {
+  color: var(--meta);
+  font-size: 0.85rem;
+}
+
+/* --- Detail --- */
+
+.message-erreur {
+  color: var(--erreur);
+}
+
+.meta {
+  color: var(--meta);
+  font-size: 0.9rem;
+  margin: 0.2rem 0;
+}
+
+.transcription-texte {
+  white-space: pre-wrap;
+}
+
+.scenes {
+  padding-left: 1.4rem;
+  display: grid;
+  gap: 0.8rem;
+}
+
+.scene h5 {
+  margin: 0 0 0.3rem;
+}
+
+.scene p {
+  margin: 0.2rem 0;
+}
+
+.scene-dialogue {
+  padding-left: 1rem;
+}
+
+/* --- Galerie visuels --- */
+
+.galerie {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.visuel {
+  margin: 0;
+  border: 1px solid var(--bordure);
+  border-radius: 6px;
+  overflow: hidden;
+  display: grid;
+}
+
+.visuel img {
+  width: 100%;
+  height: 150px;
+  object-fit: cover;
+  background: var(--fond);
+}
+
+.visuel figcaption {
+  padding: 0.6rem;
+  display: grid;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+}
+
+.visuel-titre {
+  font-weight: 600;
+}
+
+.visuel-attribution {
+  color: var(--meta);
+}
+
+.visuel-remplacer {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.visuel-remplacer input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--bordure);
+  border-radius: 6px;
+}
+
+.visuel-remplacer button {
+  padding: 0.3rem 0.6rem;
+  background: var(--carte);
+  color: var(--accent);
+}
+
+/* --- Voix --- */
+
+.voix {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  align-items: center;
+  margin: 0.4rem 0;
+}
+
+.voix-meta {
+  min-width: 140px;
+  font-size: 0.9rem;
+  color: var(--meta);
+}
+
+.voix audio {
+  height: 2.2rem;
+}
+
+.srt a {
+  color: var(--accent);
+}
+
+/* --- Validation --- */
+
+.actions-validation {
+  display: flex;
+  gap: 0.8rem;
+}
+
+.bouton-rejeter {
+  background: var(--carte);
+  color: var(--erreur);
+  border-color: var(--erreur);
+}

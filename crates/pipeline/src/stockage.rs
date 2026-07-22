@@ -19,6 +19,17 @@ use video_core::projet::Projet;
 /// Nom du fichier de base de donnees dans le dossier de donnees.
 const FICHIER_DB: &str = "pipeline.db";
 
+/// Resume leger d'un projet, pour la liste affichee par l'interface web.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ProjetResume {
+    /// Identifiant du projet.
+    pub id: String,
+    /// Etiquette d'etat (ex. `audio_recu`, `scenario_genere`, `erreur`).
+    pub etat: String,
+    /// Date de derniere mise a jour (`datetime('now')` SQLite, UTC).
+    pub maj: String,
+}
+
 /// Acces a la base SQLite du pipeline.
 #[derive(Clone)]
 pub struct Stockage {
@@ -99,6 +110,41 @@ impl Stockage {
             None => Ok(None),
         }
     }
+
+    /// Liste les projets connus, du plus recemment mis a jour au plus ancien.
+    pub async fn lister(&self) -> Result<Vec<ProjetResume>, Error> {
+        let lignes = sqlx::query("SELECT id, etat, maj FROM projets ORDER BY maj DESC, id")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(erreur_sql)?;
+        let mut resumes = Vec::with_capacity(lignes.len());
+        for ligne in lignes {
+            let champ = |nom: &str| {
+                ligne
+                    .try_get::<String, _>(nom)
+                    .map_err(|e| Error::Persistance(e.to_string()))
+            };
+            resumes.push(ProjetResume {
+                id: champ("id")?,
+                etat: etiquette_etat(&champ("etat")?),
+                maj: champ("maj")?,
+            });
+        }
+        Ok(resumes)
+    }
+}
+
+/// La colonne `etat` stocke la valeur serde JSON de `EtatPipeline`
+/// (`"audio_recu"` ou `{"erreur":"..."}`) ; on la reduit a une etiquette
+/// lisible pour la liste (le detail de l'erreur reste dans `donnees`).
+fn etiquette_etat(brut: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(brut) {
+        Ok(serde_json::Value::String(etat)) => etat,
+        Ok(serde_json::Value::Object(variante)) => {
+            variante.keys().next().cloned().unwrap_or_default()
+        }
+        _ => brut.to_string(),
+    }
 }
 
 /// Traduit une erreur sqlx en erreur centrale.
@@ -149,5 +195,32 @@ mod tests {
             .expect("chargement")
             .expect("le projet existe");
         assert_eq!(relu.etat, EtatPipeline::ScenarioGenere);
+    }
+
+    #[tokio::test]
+    async fn liste_les_projets_du_plus_recent_au_plus_ancien() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let stockage = Stockage::ouvrir(temp.path()).await.expect("ouverture");
+
+        stockage
+            .sauvegarder(&Projet::nouveau("ancien"))
+            .await
+            .expect("sauvegarde");
+        // Les deux insertions peuvent tomber dans la meme seconde : on fige
+        // la date du premier pour rendre l'ordre deterministe.
+        sqlx::query("UPDATE projets SET maj = '2020-01-01 00:00:00' WHERE id = 'ancien'")
+            .execute(&stockage.pool)
+            .await
+            .expect("mise a jour de la date");
+        let mut recent = Projet::nouveau("recent");
+        recent.etat = EtatPipeline::Erreur("STT injoignable".to_string());
+        stockage.sauvegarder(&recent).await.expect("sauvegarde");
+
+        let resumes = stockage.lister().await.expect("liste");
+        assert_eq!(resumes.len(), 2);
+        assert_eq!(resumes[0].id, "recent");
+        assert_eq!(resumes[0].etat, "erreur");
+        assert_eq!(resumes[1].id, "ancien");
+        assert_eq!(resumes[1].etat, "audio_recu");
     }
 }

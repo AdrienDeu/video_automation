@@ -7,7 +7,8 @@
 //! scenario (`POST /valider`).
 //! Phase 3 : choix des visuels licencies par l'agent Visuel.
 //! Phase 4 : voix off et sous-titres `.srt` par l'agent Conteur.
-//! Phase 5 : interface web embarquee (`GET /`) : envoi d'audio, liste des
+//! Phase 5 : montage ffmpeg (preview + video finale 1080p) par l'agent
+//! Monteur ; interface web embarquee (`GET /`) : envoi d'audio, liste des
 //! projets (`GET /projets`), suivi et validation par etape, service des
 //! fichiers du projet (`GET /projet/{id}/fichier/{nom}`).
 

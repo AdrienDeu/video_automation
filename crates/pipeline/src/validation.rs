@@ -19,6 +19,8 @@ pub enum EtapeValidation {
     Visuels,
     /// Les voix off et sous-titres produits par le Conteur (phase 4).
     Voix,
+    /// Le montage produit par le Monteur (phase 5).
+    Montage,
 }
 
 /// Enregistre la decision de validation d'une etape d'un projet.
@@ -48,6 +50,11 @@ pub fn appliquer_decision(
             !projet.voix.is_empty(),
             projet.validation_voix.is_some(),
         ),
+        EtapeValidation::Montage => (
+            EtatPipeline::MontagePret,
+            projet.video.is_some(),
+            projet.validation_montage.is_some(),
+        ),
     };
 
     if projet.etat != etat_attendu {
@@ -71,6 +78,7 @@ pub fn appliquer_decision(
         EtapeValidation::Scenario => projet.validation_scenario = Some(decision),
         EtapeValidation::Visuels => projet.validation_visuels = Some(decision),
         EtapeValidation::Voix => projet.validation_voix = Some(decision),
+        EtapeValidation::Montage => projet.validation_montage = Some(decision),
     }
     Ok(())
 }
@@ -260,5 +268,72 @@ mod tests {
             }
             autre => panic!("une erreur Pipeline est attendue, pas {autre:?}"),
         }
+    }
+
+    fn projet_montage_pret() -> Projet {
+        let mut projet = projet_voix_pretes();
+        projet.etat = EtatPipeline::MontagePret;
+        projet.validation_voix = Some(DecisionValidation::Accepte);
+        projet.video = Some("video.mp4".to_string());
+        projet.preview = Some("preview.mp4".to_string());
+        projet
+    }
+
+    #[test]
+    fn valide_le_montage() {
+        let mut projet = projet_montage_pret();
+        appliquer_decision(
+            &mut projet,
+            EtapeValidation::Montage,
+            DecisionValidation::Accepte,
+        )
+        .expect("decision");
+        assert_eq!(projet.validation_montage, Some(DecisionValidation::Accepte));
+    }
+
+    #[test]
+    fn refuse_un_montage_sans_video() {
+        let mut projet = projet_montage_pret();
+        projet.video = None;
+        let resultat = appliquer_decision(
+            &mut projet,
+            EtapeValidation::Montage,
+            DecisionValidation::Accepte,
+        );
+        assert!(matches!(resultat, Err(Error::Pipeline(_))));
+    }
+
+    #[test]
+    fn refuse_un_montage_hors_etat() {
+        let mut projet = projet_voix_pretes(); // pas encore MontagePret
+        let resultat = appliquer_decision(
+            &mut projet,
+            EtapeValidation::Montage,
+            DecisionValidation::Accepte,
+        );
+        match resultat {
+            Err(Error::Pipeline(message)) => {
+                assert!(message.contains("MontagePret"), "{message}")
+            }
+            autre => panic!("une erreur Pipeline est attendue, pas {autre:?}"),
+        }
+    }
+
+    #[test]
+    fn bloque_une_seconde_decision_sur_le_montage() {
+        let mut projet = projet_montage_pret();
+        appliquer_decision(
+            &mut projet,
+            EtapeValidation::Montage,
+            DecisionValidation::Rejete,
+        )
+        .expect("premiere decision");
+        let resultat = appliquer_decision(
+            &mut projet,
+            EtapeValidation::Montage,
+            DecisionValidation::Accepte,
+        );
+        assert!(matches!(resultat, Err(Error::Pipeline(_))));
+        assert_eq!(projet.validation_montage, Some(DecisionValidation::Rejete));
     }
 }

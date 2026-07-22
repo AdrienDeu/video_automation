@@ -33,8 +33,9 @@ fn erreur_interne(contexte: &str, e: impl std::fmt::Display) -> ErreurHttp {
 
 /// Fait avancer le pipeline tant que les portes sont ouvertes : transcription
 /// → scenario (Scenariste), puis, si le scenario est accepte, → visuels
-/// (Visuel), puis, si les visuels sont acceptes, → voix (Conteur). S'arrete
-/// des qu'une transition en mode `validation` bloque.
+/// (Visuel), puis, si les visuels sont acceptes, → voix (Conteur), puis, si
+/// les voix sont acceptees, → montage (Monteur). S'arrete des qu'une
+/// transition en mode `validation` bloque.
 async fn avancer_pipeline(etat: &AppState, projet: &mut Projet) -> Result<(), Error> {
     if projet.etat == EtatPipeline::Transcrit {
         let extracteur =
@@ -56,6 +57,12 @@ async fn avancer_pipeline(etat: &AppState, projet: &mut Projet) -> Result<(), Er
         && projet.validation_visuels == Some(DecisionValidation::Accepte)
     {
         agents::conteur::produire_voix(projet, &etat.config, etat.config.pipeline.voix).await?;
+    }
+    if projet.etat == EtatPipeline::VoixPretes
+        && projet.validation_voix == Some(DecisionValidation::Accepte)
+    {
+        agents::monteur::produire_montage(projet, &etat.config, etat.config.pipeline.montage)
+            .await?;
     }
     Ok(())
 }
@@ -281,6 +288,7 @@ fn type_mime(nom: &str) -> &'static str {
         "wav" => "audio/wav",
         "ogg" => "audio/ogg",
         "srt" => "text/plain; charset=utf-8",
+        "mp4" => "video/mp4",
         _ => "application/octet-stream",
     }
 }
@@ -292,15 +300,17 @@ pub struct RequeteValidation {
     pub id: String,
     /// Decision prise sur l'etape (`accepte` ou `rejete`).
     pub decision: DecisionValidation,
-    /// Etape concernee (`scenario` par defaut, `visuels` ou `voix`).
+    /// Etape concernee (`scenario` par defaut, `visuels`, `voix` ou
+    /// `montage`).
     pub etape: Option<pipeline::validation::EtapeValidation>,
 }
 
 /// `POST /valider` : enregistre la decision humaine sur une etape en mode
-/// `validation` (scenario par defaut, visuels ou voix via `etape`).
+/// `validation` (scenario par defaut, visuels, voix ou montage via `etape`).
 ///
 /// Apres une acceptation, le pipeline enchaine avec l'etape suivante si une
-/// cle API est disponible (visuels apres scenario, voix apres visuels).
+/// cle API est disponible (visuels apres scenario, voix apres visuels,
+/// montage apres voix).
 ///
 /// Renvoie `409` si le projet n'attend pas de decision (mauvais etat ou etape
 /// deja tranchee), `404` si le projet est inconnu.
@@ -826,6 +836,83 @@ mod tests {
             .await
             .expect("reponse");
         assert_eq!(reponse.status(), StatusCode::CONFLICT);
+    }
+
+    /// Cree en base un projet en etat `MontagePret`, pret a etre valide.
+    async fn semer_projet_montage(data_dir: &std::path::Path) -> Projet {
+        let mut projet = semer_projet_voix(data_dir).await;
+        projet.etat = EtatPipeline::MontagePret;
+        projet.validation_voix = Some(DecisionValidation::Accepte);
+        projet.video = Some("video.mp4".to_string());
+        projet.preview = Some("preview.mp4".to_string());
+        let stockage = Stockage::ouvrir(data_dir).await.expect("ouverture");
+        stockage.sauvegarder(&projet).await.expect("persistance");
+        projet
+    }
+
+    #[tokio::test]
+    async fn post_valider_accepte_le_montage() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+        semer_projet_montage(temp.path()).await;
+
+        let reponse = app
+            .oneshot(requete_validation_etape(
+                "projetscenario",
+                "accepte",
+                "montage",
+            ))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::OK);
+        let projet = projet_depuis(reponse).await;
+        assert_eq!(projet.validation_montage, Some(DecisionValidation::Accepte));
+        assert_eq!(projet.etat, EtatPipeline::MontagePret);
+    }
+
+    #[tokio::test]
+    async fn post_valider_montage_refuse_un_projet_hors_etat() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+        semer_projet_voix(temp.path()).await; // etat VoixPretes seulement
+
+        let reponse = app
+            .oneshot(requete_validation_etape(
+                "projetscenario",
+                "accepte",
+                "montage",
+            ))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn get_fichier_sert_une_video_mp4() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+        semer_projet_montage(temp.path()).await;
+        let dossier = temp.path().join("projetscenario");
+        tokio::fs::create_dir_all(&dossier)
+            .await
+            .expect("creation du dossier du projet");
+        tokio::fs::write(dossier.join("preview.mp4"), b"fausse video")
+            .await
+            .expect("ecriture de la video");
+
+        let reponse = app
+            .oneshot(
+                Request::get("/projet/projetscenario/fichier/preview.mp4")
+                    .body(Body::empty())
+                    .expect("construction de la requete"),
+            )
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::OK);
+        assert_eq!(
+            reponse.headers()["content-type"],
+            axum::http::HeaderValue::from_static("video/mp4")
+        );
     }
 
     #[tokio::test]

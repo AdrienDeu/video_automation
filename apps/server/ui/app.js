@@ -177,6 +177,7 @@ function renderDetail(projet) {
   renderScenario(projet);
   renderVisuels(projet);
   renderVoix(projet);
+  renderMontage(projet);
   renderValidation(projet, info);
 }
 
@@ -322,6 +323,31 @@ function renderVoix(projet) {
   }
 }
 
+// --- Montage ----------------------------------------------------------------
+
+// Preview (ou video finale a defaut) en lecteur video, avec lien de
+// telechargement de la video finale 1080p.
+function renderMontage(projet) {
+  const zone = document.getElementById("detail-montage");
+  zone.textContent = "";
+  if (!projet.preview && !projet.video) return;
+
+  zone.append(el("h3", null, "Montage"));
+  const lecteur = document.createElement("video");
+  lecteur.controls = true;
+  lecteur.src = urlFichier(projet.id, projet.preview || projet.video);
+  zone.append(lecteur);
+  if (projet.video) {
+    const lien = document.createElement("a");
+    lien.href = urlFichier(projet.id, projet.video);
+    lien.download = projet.video;
+    lien.textContent = "Telecharger la video finale";
+    const ligne = el("p", "srt");
+    ligne.append(lien);
+    zone.append(ligne);
+  }
+}
+
 // --- Validation humaine -----------------------------------------------------
 
 // Etape en attente de decision, s'il y en a une : on n'affiche les boutons
@@ -330,6 +356,7 @@ function etapeEnAttente(projet, codeEtat) {
   if (codeEtat === "scenario_genere" && projet.validation_scenario == null) return "scenario";
   if (codeEtat === "visuels_prets" && projet.validation_visuels == null) return "visuels";
   if (codeEtat === "voix_pretes" && projet.validation_voix == null) return "voix";
+  if (codeEtat === "montage_pret" && projet.validation_montage == null) return "montage";
   return null;
 }
 
@@ -337,6 +364,7 @@ const LIBELLES_ETAPES = {
   scenario: "le scenario",
   visuels: "les visuels",
   voix: "les voix",
+  montage: "le montage",
 };
 
 function renderValidation(projet, info) {

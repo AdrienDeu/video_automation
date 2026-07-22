@@ -17,6 +17,8 @@ scenario = "validation"
 visuels = "validation"
 # Mode de la transition apres generation des voix.
 voix = "validation"
+# Mode de la transition apres le montage ffmpeg (preview + video finale).
+montage = "validation"
 
 [voix]
 # Endpoint TTS (compatible OpenAI /v1/audio/speech ; hypothese phase 4,

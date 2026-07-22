@@ -42,6 +42,16 @@ pub struct Projet {
     /// Decision de validation humaine des voix.
     #[serde(default)]
     pub validation_voix: Option<DecisionValidation>,
+    /// Video finale 1080p produite par le Monteur (ex. `video.mp4`), presente
+    /// une fois l'etat `MontagePret` atteint.
+    #[serde(default)]
+    pub video: Option<String>,
+    /// Preview basse resolution pour la validation humaine (ex. `preview.mp4`).
+    #[serde(default)]
+    pub preview: Option<String>,
+    /// Decision de validation humaine du montage.
+    #[serde(default)]
+    pub validation_montage: Option<DecisionValidation>,
 }
 
 /// Decision prise par l'utilisateur sur une etape en mode `validation`.
@@ -69,6 +79,9 @@ impl Projet {
             voix: Vec::new(),
             sous_titres: Vec::new(),
             validation_voix: None,
+            video: None,
+            preview: None,
+            validation_montage: None,
         }
     }
 }

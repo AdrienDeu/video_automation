@@ -3,9 +3,11 @@
 //!
 //! Phase 1 : `transcrire_audio`. Phase 3 : `images` (choix d'images
 //! licenciees). Phase 4 : `voix` (TTS avec cache par hash) et `sous_titres`
-//! (`.srt` synchronises). Les outils sont de simples fonctions testables
+//! (`.srt` synchronises). Phase 5 : `ffmpeg` (rendu de la video via whitelist
+//! de templates). Les outils sont de simples fonctions testables
 //! independamment du LLM ; leur declaration a rig vit dans la facade `llm`.
 
+pub mod ffmpeg;
 pub mod images;
 pub mod sous_titres;
 pub mod transcrire;

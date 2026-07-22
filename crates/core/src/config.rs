@@ -113,15 +113,20 @@ pub struct PipelineConfig {
     /// Mode de la transition qui suit la generation des voix.
     #[serde(default)]
     pub voix: ModeTransition,
+    /// Mode de la transition qui suit le montage ffmpeg (phase 5).
+    #[serde(default)]
+    pub montage: ModeTransition,
 }
 
 impl Default for PipelineConfig {
     fn default() -> Self {
-        // Defaut prudent : scenario, visuels et voix sont relus par un humain.
+        // Defaut prudent : scenario, visuels, voix et montage sont relus par
+        // un humain.
         Self {
             scenario: ModeTransition::Validation,
             visuels: ModeTransition::Validation,
             voix: ModeTransition::Validation,
+            montage: ModeTransition::Validation,
         }
     }
 }
@@ -252,13 +257,15 @@ mod tests {
         assert_eq!(config.pipeline, PipelineConfig::default());
         assert_eq!(config.pipeline.scenario, ModeTransition::Validation);
         assert_eq!(config.pipeline.voix, ModeTransition::Validation);
+        assert_eq!(config.pipeline.montage, ModeTransition::Validation);
 
         // Avec une section [pipeline] explicite.
-        let toml = format!("{toml}\n[pipeline]\nscenario = \"auto\"\n");
+        let toml = format!("{toml}\n[pipeline]\nscenario = \"auto\"\nmontage = \"auto\"\n");
         let config: Config = Figment::from(Toml::string(&toml))
             .extract()
             .expect("le TOML avec [pipeline] doit etre valide");
         assert_eq!(config.pipeline.scenario, ModeTransition::Auto);
+        assert_eq!(config.pipeline.montage, ModeTransition::Auto);
     }
 
     #[test]

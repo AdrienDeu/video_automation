@@ -187,7 +187,8 @@ main {
   background: var(--erreur-doux);
 }
 
-.badge-inconnu {
+.badge-inconnu,
+.badge-annule {
   color: var(--meta);
   background: rgba(139, 148, 167, 0.14);
 }
@@ -657,6 +658,37 @@ button:disabled {
 .bouton-rejeter:hover:not(:disabled) {
   background: var(--erreur-doux);
   box-shadow: none;
+}
+
+/* --- Annulation et reprise --- */
+
+.actions-annulation {
+  display: flex;
+  gap: 0.8rem;
+  margin-top: 0.8rem;
+}
+
+.bouton-annuler {
+  background: transparent;
+  color: var(--meta);
+  border: 1px solid var(--bordure);
+  box-shadow: none;
+}
+
+.bouton-annuler:hover:not(:disabled) {
+  color: var(--erreur);
+  border-color: var(--erreur);
+  background: var(--erreur-doux);
+  box-shadow: none;
+}
+
+.bouton-reprendre {
+  background: linear-gradient(135deg, var(--accent), #4a6bdf);
+  box-shadow: 0 4px 14px rgba(110, 139, 255, 0.3);
+}
+
+.bouton-reprendre:hover:not(:disabled) {
+  box-shadow: 0 6px 20px rgba(110, 139, 255, 0.4);
 }
 
 /* --- Defilement --- */

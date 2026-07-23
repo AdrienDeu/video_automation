@@ -305,7 +305,7 @@ mod tests {
             &CancellationToken::new(),
         )
         .await
-            .expect("la production doit aboutir");
+        .expect("la production doit aboutir");
 
         assert_eq!(projet.etat, EtatPipeline::VoixPretes);
         assert_eq!(projet.voix.len(), 4); // 2 scenes x 2 langues

@@ -109,13 +109,18 @@ async fn executer(etat: &AppState, id: &str, demande: Demande, token: &Cancellat
 
 /// Transcrit l'audio du projet (etat `AudioRecu` → `Transcrit`) et persiste
 /// ce point d'etape ; sans effet si la transcription existe deja (reprise).
-async fn transcrire(etat: &AppState, projet: &mut Projet, langue: Option<&str>) -> Result<(), Error> {
+async fn transcrire(
+    etat: &AppState,
+    projet: &mut Projet,
+    langue: Option<&str>,
+) -> Result<(), Error> {
     if projet.etat != EtatPipeline::AudioRecu {
         return Ok(());
     }
-    let cle = etat.cle_api.as_deref().ok_or_else(|| {
-        Error::Llm("MISTRAL_API_KEY absente de l'environnement".to_string())
-    })?;
+    let cle = etat
+        .cle_api
+        .as_deref()
+        .ok_or_else(|| Error::Llm("MISTRAL_API_KEY absente de l'environnement".to_string()))?;
     let nom = projet
         .audio
         .clone()

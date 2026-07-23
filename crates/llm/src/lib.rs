@@ -11,5 +11,5 @@ pub mod visuel;
 // Re-exports necessaires aux signatures des crates clients (agents, server) :
 // ils manipulent agents, extracteurs et modeles sans dependre de rig-core.
 pub use rig_core::agent::Agent;
-pub use rig_core::completion::{CompletionModel, Prompt};
+pub use rig_core::completion::{CompletionModel, Prompt, PromptError};
 pub use rig_core::extractor::Extractor;

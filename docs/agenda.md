@@ -74,6 +74,10 @@ Découpage : **8 phases / 12 semaines**, jalons à la fin.
   les étapes impactées.
 
 ### Phase 8 — Durcissement (S12)
+- **Annulation à n'importe quelle étape** : pipeline en tâche de fond
+  (token d'annulation par projet), `POST /annuler` (interruption propre
+  entre deux scènes/rendus/chunks, ffmpeg tué via `kill_on_drop`) et
+  `POST /reprendre` (reprise au dernier livrable stable) — fait.
 - Tests d'intégration avec LLM mocké (cassettes), tests des tools sur
   fixtures (audio/images).
 - Observabilité (tracing, métriques de coûts API), rotation des journaux.

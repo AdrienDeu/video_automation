@@ -18,6 +18,7 @@ const LIBELLES_ETATS = {
   voix_pretes: "Voix pretes",
   montage_pret: "Montage pret",
   publie: "Publie",
+  annule: "Annule",
   erreur: "Erreur",
 };
 
@@ -225,6 +226,7 @@ function renderDetail(projet) {
   renderMontage(projet);
   renderPublication(projet);
   renderValidation(projet, info);
+  renderAnnulation(projet, info);
 }
 
 // Stepper des etapes du pipeline : faites, active, ou neutres si erreur
@@ -536,6 +538,64 @@ function afficherErreurAction(message) {
   const zone = document.getElementById("detail-validation");
   zone.querySelectorAll(".message-erreur").forEach((n) => n.remove());
   zone.append(el("p", "message-erreur", message));
+}
+
+// --- Annulation et reprise (phase 8) ----------------------------------------
+
+// Bouton « Annuler » pour tout projet non terminal, « Reprendre » pour un
+// projet annule. Rendu dans la zone validation (videe par renderValidation,
+// donc appele apres elle).
+function renderAnnulation(projet, info) {
+  const zone = document.getElementById("detail-validation");
+  if (info.code === "publie") return;
+
+  const actions = el("div", "actions-annulation");
+  if (info.code === "annule") {
+    const reprendre = el("button", "bouton-reprendre", "Reprendre");
+    reprendre.type = "button";
+    reprendre.addEventListener("click", () => reprendreProjet(projet.id, reprendre));
+    actions.append(reprendre);
+  } else {
+    const annuler = el("button", "bouton-annuler", "Annuler");
+    annuler.type = "button";
+    annuler.addEventListener("click", () => annulerProjet(projet.id, annuler));
+    actions.append(annuler);
+  }
+  zone.append(actions);
+}
+
+async function annulerProjet(id, bouton) {
+  bouton.disabled = true;
+  try {
+    // 200 : projet marque Annule ; 202 : tache en cours, elle persistera
+    // l'etat Annule — le flux SSE mettra l'interface a jour.
+    const projet = await postJSON("/annuler", { id });
+    if (projet) {
+      renderDetail(projet);
+      afficherInfo("Annulation demandee : le traitement s'arrete au prochain point de controle.");
+      rafraichirListe();
+    }
+  } catch (erreur) {
+    afficherErreurAction("Annulation impossible : " + erreur.message);
+  } finally {
+    bouton.disabled = false;
+  }
+}
+
+async function reprendreProjet(id, bouton) {
+  bouton.disabled = true;
+  try {
+    const projet = await postJSON("/reprendre", { id });
+    if (projet) {
+      renderDetail(projet);
+      afficherInfo("Pipeline relance depuis le dernier point stable.");
+      rafraichirListe();
+    }
+  } catch (erreur) {
+    afficherErreurAction("Reprise impossible : " + erreur.message);
+  } finally {
+    bouton.disabled = false;
+  }
 }
 
 function afficherInfo(message) {

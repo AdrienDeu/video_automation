@@ -58,8 +58,9 @@ pub struct AppState {
     /// Tokens d'annulation des taches de pipeline en cours, par identifiant
     /// de projet (phase 8) : `POST /annuler` y puise le token a declencher,
     /// `tache::lancer_pipeline` l'y inscrit puis le retire en fin de tache.
-    pub taches:
-        std::sync::Mutex<std::collections::HashMap<String, video_core::annulation::CancellationToken>>,
+    pub taches: std::sync::Mutex<
+        std::collections::HashMap<String, video_core::annulation::CancellationToken>,
+    >,
 }
 
 /// Construit le routeur de l'application (isole de `main` pour les tests).

@@ -137,6 +137,25 @@ AudioRecu → Transcrit → ScenarioGenere → VisuelsPrets → VoixPretes
   avec le détail ; le Réalisateur propose une correction ou une nouvelle
   tentative.
 
+### Annulation et reprise (phase 8)
+
+Les étapes s'exécutent en **tâche de fond** (les POST déclencheurs —
+`/audio`, `/valider`, `/affiner` — répondent dès l'état courant persisté, la
+progression est suivie via `GET /projet/{id}` ou le flux SSE). Chaque tâche
+porte un `CancellationToken` inscrit dans le registre du serveur :
+
+- `POST /annuler { id }` : déclenche le token de la tâche en cours (`202`),
+  ou marque directement le projet `Annule` s'il est au repos (`200`). La
+  tâche s'interrompt à son prochain point de contrôle — entre deux scènes
+  (visuels, voix), entre deux rendus ffmpeg (le process est tué via
+  `kill_on_drop`) ou entre deux chunks d'upload — puis persiste l'état
+  `Annule`. Refus (`409`) pour un projet déjà publié ou déjà annulé.
+- `POST /reprendre { id }` : replace le projet à son **point de reprise**,
+  dérivé des livrables déjà produits (`video_core::annulation::point_de_reprise`),
+  puis relance le pipeline en tâche de fond. Les étapes abouties ne sont pas
+  rejouées (cache TTS par hash, images déjà téléchargées). `409` si le
+  projet n'est pas en état `Annule`.
+
 ## 9. Sécurité, licences, coûts
 
 - **Secrets** : variables d'environnement (`MISTRAL_API_KEY`, OAuth Google),

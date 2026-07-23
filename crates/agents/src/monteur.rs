@@ -379,7 +379,8 @@ mod tests {
         let token = CancellationToken::new();
         token.cancel();
 
-        let resultat = produire_montage(&mut projet, &config, ModeTransition::Validation, &token).await;
+        let resultat =
+            produire_montage(&mut projet, &config, ModeTransition::Validation, &token).await;
         assert!(matches!(resultat, Err(Error::Annulation)));
         assert_eq!(projet.etat, EtatPipeline::VoixPretes);
     }

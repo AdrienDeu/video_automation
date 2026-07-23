@@ -452,7 +452,16 @@ pub async fn publier_video(
     chemin: &Path,
     token: &video_core::annulation::CancellationToken,
 ) -> Result<String, Error> {
-    publier_video_taille(http, endpoints, jeton, metadonnees, chemin, TAILLE_CHUNK, token).await
+    publier_video_taille(
+        http,
+        endpoints,
+        jeton,
+        metadonnees,
+        chemin,
+        TAILLE_CHUNK,
+        token,
+    )
+    .await
 }
 
 #[cfg(test)]

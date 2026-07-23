@@ -15,6 +15,11 @@ use video_core::projet::{DecisionValidation, Projet};
 /// Nombre maximal d'appels modele par scene (appel d'outil + cloture).
 const TOURS_MAX_PAR_SCENE: u32 = 4;
 
+/// Nombre maximal de tentatives de la boucle agent/outil par scene : le
+/// modele emet parfois un nom d'outil malforme (ex. `fasterxmlchoisir_image`),
+/// erreur transitoire qu'une nouvelle tentative resout.
+const TENTATIVES_MAX_PAR_SCENE: u32 = 3;
+
 /// Fait passer un projet de `ScenarioGenere` (scenario accepte) a
 /// `VisuelsPrets` : une image licenciee est choisie pour chaque scene.
 ///
@@ -81,11 +86,21 @@ pub async fn produire_visuels_avec_consigne<M: CompletionModel + 'static>(
             ));
         }
         consigne.push_str("Appelle choisir_image pour illustrer cette scene.");
-        agent
-            .prompt(consigne)
-            .max_turns(TOURS_MAX_PAR_SCENE as usize)
-            .await
-            .map_err(|e| Error::Llm(format!("choix de l'image de la scene {index} : {e}")))?;
+        if let Err(erreur) = prompter_avec_nouvelles_tentatives(agent, &consigne).await {
+            // Le modele appelle parfois l'outil plusieurs fois par scene et
+            // epuse ses tours (MaxTurnsError) : l'image a quand meme ete
+            // telechargee, la scene est illustree — on l'accepte.
+            let scene_illustree = images_choisies
+                .lock()
+                .expect("mutex non empoisonne")
+                .iter()
+                .any(|a| a.scene == index);
+            if !scene_illustree {
+                return Err(Error::Llm(format!(
+                    "choix de l'image de la scene {index} : {erreur}"
+                )));
+            }
+        }
     }
 
     // Une image par scene, dans l'ordre : la premiere image choisie pour une
@@ -107,6 +122,37 @@ pub async fn produire_visuels_avec_consigne<M: CompletionModel + 'static>(
         projet.validation_visuels = Some(DecisionValidation::Accepte);
     }
     Ok(())
+}
+
+/// Lance la boucle agent/outil d'une scene, avec nouvelle tentative quand le
+/// modele appelle un outil inconnu : un nom malforme (ex.
+/// `fasterxmlchoisir_image`) est une erreur transitoire cote LLM, que rejouer
+/// la meme consigne resout en general. Les autres erreurs (reseau, quota,
+/// outil en echec) remontent sans reessai.
+async fn prompter_avec_nouvelles_tentatives<M: CompletionModel + 'static>(
+    agent: &Agent<M>,
+    consigne: &str,
+) -> Result<String, llm::PromptError> {
+    let mut tentative = 0;
+    loop {
+        tentative += 1;
+        match agent
+            .prompt(consigne.to_string())
+            .max_turns(TOURS_MAX_PAR_SCENE as usize)
+            .await
+        {
+            Ok(reponse) => return Ok(reponse),
+            Err(erreur)
+                if tentative < TENTATIVES_MAX_PAR_SCENE && est_outil_inconnu(&erreur) => {}
+            Err(erreur) => return Err(erreur),
+        }
+    }
+}
+
+/// Detecte l'erreur transitoire « le modele a appele un outil inconnu » dans
+/// le message de rig (le nom malforme varie, le message est stable).
+fn est_outil_inconnu(erreur: &impl std::fmt::Display) -> bool {
+    erreur.to_string().contains("unknown or disallowed tool")
 }
 
 /// Construit l'agent Visuel et son outil depuis la configuration du projet,
@@ -349,6 +395,23 @@ mod tests {
         }
     }
 
+    /// Reponse du modele appelant un nom d'outil malforme, erreur transitoire
+    /// observee cote Mistral (`fasterxmlchoisir_image`).
+    fn reponse_appel_outil_inconnu() -> CompletionResponse<serde_json::Value> {
+        CompletionResponse {
+            choice: OneOrMany::one(AssistantContent::ToolCall(ToolCall::new(
+                "appel_malforme".to_string(),
+                ToolFunction::new(
+                    "fasterxmlchoisir_image".to_string(),
+                    serde_json::json!({ "scene_id": 0 }),
+                ),
+            ))),
+            usage: Usage::new(),
+            raw_response: serde_json::json!({}),
+            message_id: None,
+        }
+    }
+
     fn projet_scenario_accepte(nb_scenes: usize) -> Projet {
         let mut projet = Projet::nouveau("abc123");
         projet.etat = EtatPipeline::ScenarioGenere;
@@ -530,6 +593,111 @@ mod tests {
                 assert!(message.contains("scene 1"), "{message}")
             }
             autre => panic!("une erreur Pipeline est attendue, pas {autre:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reessaie_apres_un_nom_d_outil_malforme() {
+        let mut projet = projet_scenario_accepte(1);
+        // Premiere tentative : le modele appelle un outil inconnu ; la seconde
+        // rejoue la meme consigne et aboutit.
+        let reponses = VecDeque::from(vec![
+            reponse_appel_outil_inconnu(),
+            reponse_appel_outil(0),
+            reponse_texte(),
+        ]);
+        let choisies: ImagesChoisies = Arc::new(Mutex::new(vec![]));
+        let agent = AgentBuilder::new(ModeleFactice {
+            reponses: Arc::new(Mutex::new(reponses)),
+            requetes: Arc::new(Mutex::new(vec![])),
+        })
+        .tool(ChoisirImageFactice {
+            choisies: choisies.clone(),
+        })
+        .build();
+
+        produire_visuels(
+            &mut projet,
+            &agent,
+            &choisies,
+            ModeTransition::Validation,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("la production doit aboutir apres une nouvelle tentative");
+
+        assert_eq!(projet.etat, EtatPipeline::VisuelsPrets);
+        assert_eq!(projet.visuels.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn accepte_la_scene_si_l_image_est_choisie_malgre_max_turns() {
+        let mut projet = projet_scenario_accepte(1);
+        // Le modele appelle l'outil en boucle sans jamais cloturer : rig leve
+        // MaxTurnsError, mais l'image de la scene a ete telechargee au premier
+        // appel — la scene est illustree, la production doit aboutir.
+        let reponses = VecDeque::from(vec![
+            reponse_appel_outil(0),
+            reponse_appel_outil(0),
+            reponse_appel_outil(0),
+            reponse_appel_outil(0),
+        ]);
+        let choisies: ImagesChoisies = Arc::new(Mutex::new(vec![]));
+        let agent = AgentBuilder::new(ModeleFactice {
+            reponses: Arc::new(Mutex::new(reponses)),
+            requetes: Arc::new(Mutex::new(vec![])),
+        })
+        .tool(ChoisirImageFactice {
+            choisies: choisies.clone(),
+        })
+        .build();
+
+        produire_visuels(
+            &mut projet,
+            &agent,
+            &choisies,
+            ModeTransition::Validation,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("la production doit aboutir malgre MaxTurnsError");
+
+        assert_eq!(projet.etat, EtatPipeline::VisuelsPrets);
+        assert_eq!(projet.visuels.len(), 1);
+        assert_eq!(projet.visuels[0].scene, 0);
+    }
+
+    #[tokio::test]
+    async fn echoue_apres_trois_noms_d_outil_malformes() {
+        let mut projet = projet_scenario_accepte(1);
+        let reponses = VecDeque::from(vec![
+            reponse_appel_outil_inconnu(),
+            reponse_appel_outil_inconnu(),
+            reponse_appel_outil_inconnu(),
+        ]);
+        let choisies: ImagesChoisies = Arc::new(Mutex::new(vec![]));
+        let agent = AgentBuilder::new(ModeleFactice {
+            reponses: Arc::new(Mutex::new(reponses)),
+            requetes: Arc::new(Mutex::new(vec![])),
+        })
+        .tool(ChoisirImageFactice {
+            choisies: choisies.clone(),
+        })
+        .build();
+
+        let resultat = produire_visuels(
+            &mut projet,
+            &agent,
+            &choisies,
+            ModeTransition::Validation,
+            &CancellationToken::new(),
+        )
+        .await;
+        match resultat {
+            Err(Error::Llm(message)) => {
+                assert!(message.contains("scene 0"), "{message}")
+            }
+            autre => panic!("une erreur Llm est attendue, pas {autre:?}"),
         }
     }
 

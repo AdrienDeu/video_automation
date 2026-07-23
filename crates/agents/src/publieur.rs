@@ -97,9 +97,15 @@ pub async fn produire_publication(
     let chemin = config.data_dir.join(&projet.id).join(&video);
     let http = youtube::client_http()?;
     let jeton = youtube::rafraichir_token(&http, &contexte.endpoints, &contexte.secrets).await?;
-    let id_video =
-        youtube::publier_video(&http, &contexte.endpoints, &jeton, &metadonnees, &chemin, token)
-            .await?;
+    let id_video = youtube::publier_video(
+        &http,
+        &contexte.endpoints,
+        &jeton,
+        &metadonnees,
+        &chemin,
+        token,
+    )
+    .await?;
     stockage.incrementer_uploads().await?;
 
     projet.youtube = Some(PublicationYoutube {

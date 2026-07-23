@@ -70,8 +70,22 @@ async fn sauvegarder_point_d_etape(etat: &AppState, projet: &Projet) -> Result<(
 /// La publication n'est tentee que si les identifiants OAuth YouTube sont
 /// configures (sinon le projet reste en `MontagePret` accepte ; ni le montage
 /// ni la publication n'ont besoin de la cle Mistral).
-async fn avancer_pipeline(etat: &AppState, projet: &mut Projet) -> Result<(), Error> {
+///
+/// Executee dans la tache de fond du projet (`tache::lancer_pipeline`) :
+/// chaque etape franchie est persistee aussitot (suivi SSE, reprise apres
+/// crash) et le token d'annulation est verifie avant chaque etape — les
+/// etapes elles-memes le verifient aussi dans leurs boucles internes.
+///
+/// # Erreurs
+/// `Error::Annulation` si l'annulation est demandee entre deux etapes ;
+/// sinon l'erreur de l'etape en echec.
+pub(crate) async fn avancer_pipeline(
+    etat: &AppState,
+    projet: &mut Projet,
+    token: &CancellationToken,
+) -> Result<(), Error> {
     if projet.etat == EtatPipeline::Transcrit {
+        point_de_controle(token)?;
         let extracteur = etat
             .scenariste
             .as_ref()
@@ -82,34 +96,56 @@ async fn avancer_pipeline(etat: &AppState, projet: &mut Projet) -> Result<(), Er
             etat.config.pipeline.scenario,
         )
         .await?;
+        sauvegarder_point_d_etape(etat, projet).await?;
     }
     if projet.etat == EtatPipeline::ScenarioGenere
         && projet.validation_scenario == Some(DecisionValidation::Accepte)
     {
+        point_de_controle(token)?;
         agents::visuel::produire_visuels_depuis_config(
             projet,
             &etat.config,
             etat.config.pipeline.visuels,
+            token,
         )
         .await?;
+        sauvegarder_point_d_etape(etat, projet).await?;
     }
     if projet.etat == EtatPipeline::VisuelsPrets
         && projet.validation_visuels == Some(DecisionValidation::Accepte)
     {
-        agents::conteur::produire_voix(projet, &etat.config, etat.config.pipeline.voix).await?;
+        point_de_controle(token)?;
+        agents::conteur::produire_voix(projet, &etat.config, etat.config.pipeline.voix, token)
+            .await?;
+        sauvegarder_point_d_etape(etat, projet).await?;
     }
     if projet.etat == EtatPipeline::VoixPretes
         && projet.validation_voix == Some(DecisionValidation::Accepte)
     {
-        agents::monteur::produire_montage(projet, &etat.config, etat.config.pipeline.montage)
-            .await?;
+        point_de_controle(token)?;
+        agents::monteur::produire_montage(
+            projet,
+            &etat.config,
+            etat.config.pipeline.montage,
+            token,
+        )
+        .await?;
+        sauvegarder_point_d_etape(etat, projet).await?;
     }
     if projet.etat == EtatPipeline::MontagePret
         && projet.validation_montage == Some(DecisionValidation::Accepte)
     {
         if let Some(contexte) = &etat.youtube {
-            agents::publieur::produire_publication(projet, &etat.config, &etat.stockage, contexte)
-                .await?;
+            point_de_controle(token)?;
+            agents::publieur::produire_publication(
+                projet,
+                &etat.config,
+                &etat.stockage,
+                contexte,
+                token,
+            )
+            .await?;
+            sauvegarder_point_d_etape(etat, projet).await?;
         }
     }
     Ok(())
@@ -117,13 +153,13 @@ async fn avancer_pipeline(etat: &AppState, projet: &mut Projet) -> Result<(), Er
 
 /// `POST /audio` : recoit un fichier audio (multipart, champ `audio`, champ
 /// optionnel `langue`), le stocke dans `data/<id>/` puis, si
-/// `MISTRAL_API_KEY` est definie, enchaine transcription STT (Voxtral) et
-/// generation du scenario (Scenariste).
+/// `MISTRAL_API_KEY` est definie, lance la transcription STT (Voxtral) et la
+/// suite du pipeline en tache de fond (`tache::lancer_pipeline`).
 ///
 /// Sans cle API, l'audio est simplement stocke et le projet reste en etat
-/// `AudioRecu`. Avec cle : le projet atteint `Transcrit`, puis
-/// `ScenarioGenere` ; en cas d'echec d'une de ces etapes, il est persiste en
-/// etat `Erreur` et renvoye avec un statut `502`.
+/// `AudioRecu`. La reponse est immediate (`201`) : la progression est suivie
+/// via `GET /projet/{id}` ou le flux SSE ; un echec d'etape est persiste en
+/// etat `Erreur`, une annulation (`POST /annuler`) en etat `Annule`.
 pub async fn post_audio(
     State(etat): State<Arc<AppState>>,
     mut multipart: Multipart,
@@ -226,32 +262,10 @@ pub async fn post_audio(
     sauvegarder_et_notifier(&etat, &projet).await?;
 
     // Sans cle API, l'audio est stocke et les etapes LLM restent a faire.
-    let Some(cle) = &etat.cle_api else {
-        return Ok((StatusCode::CREATED, Json(projet)));
-    };
-
-    match tools::transcrire::transcrire_audio(&chemin_audio, langue.as_deref(), cle).await {
-        Ok(transcription) => {
-            projet.transcription = Some(transcription);
-            projet.etat = EtatPipeline::Transcrit;
-            // Enchaine scenario puis visuels tant que les portes le
-            // permettent (modes auto/validation).
-            let statut = match avancer_pipeline(&etat, &mut projet).await {
-                Ok(()) => StatusCode::CREATED,
-                Err(erreur) => {
-                    projet.etat = EtatPipeline::Erreur(erreur.to_string());
-                    StatusCode::BAD_GATEWAY
-                }
-            };
-            sauvegarder_et_notifier(&etat, &projet).await?;
-            Ok((statut, Json(projet)))
-        }
-        Err(erreur) => {
-            projet.etat = EtatPipeline::Erreur(erreur.to_string());
-            sauvegarder_et_notifier(&etat, &projet).await?;
-            Ok((StatusCode::BAD_GATEWAY, Json(projet)))
-        }
+    if etat.cle_api.is_some() {
+        tache::lancer_pipeline(&etat, &projet.id, tache::Demande::Transcription { langue });
     }
+    Ok((StatusCode::CREATED, Json(projet)))
 }
 
 /// `GET /projets` : liste legere des projets (id, etat, date de mise a jour),
@@ -347,11 +361,12 @@ pub struct RequeteValidation {
 /// `POST /valider` : enregistre la decision humaine sur une etape en mode
 /// `validation` (scenario par defaut, visuels, voix ou montage via `etape`).
 ///
-/// Apres une acceptation, le pipeline enchaine avec l'etape suivante si une
-/// cle API est disponible (visuels apres scenario, voix apres visuels,
-/// montage apres voix) ; apres acceptation du montage, la publication
-/// YouTube est enchainee sans cle Mistral si les identifiants OAuth sont
-/// configures.
+/// Apres une acceptation, la suite du pipeline est lancee en tache de fond si
+/// possible (visuels apres scenario, voix apres visuels, montage apres voix —
+/// ces etapes exigent la cle Mistral ; apres acceptation du montage, la
+/// publication — qui n'en a pas besoin — est lancee des lors que les
+/// identifiants YouTube sont configures). La reponse est immediate : la
+/// progression est suivie via `GET /projet/{id}` ou le flux SSE.
 ///
 /// Renvoie `409` si le projet n'attend pas de decision (mauvais etat ou etape
 /// deja tranchee), `404` si le projet est inconnu.
@@ -382,27 +397,17 @@ pub async fn post_valider(
     pipeline::validation::appliquer_decision(&mut projet, etape, requete.decision)
         .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
 
-    // Etape acceptee : on enchaine avec la suite du pipeline si possible
-    // (avancer_pipeline ne franchit que les portes ouvertes). Les etapes
-    // amont exigent la cle Mistral ; le montage etant accepte, la
-    // publication — qui n'en a pas besoin — peut etre enchainee des lors que
-    // les identifiants YouTube sont configures.
+    sauvegarder_et_notifier(&etat, &projet).await?;
+
+    // Etape acceptee : la suite du pipeline part en tache de fond
+    // (`avancer_pipeline` ne franchit que les portes ouvertes).
     let suite_possible = etat.cle_api.is_some()
         || (etape == pipeline::validation::EtapeValidation::Montage && etat.youtube.is_some());
-    let statut = if requete.decision == DecisionValidation::Accepte && suite_possible {
-        match avancer_pipeline(&etat, &mut projet).await {
-            Ok(()) => StatusCode::OK,
-            Err(erreur) => {
-                projet.etat = EtatPipeline::Erreur(erreur.to_string());
-                StatusCode::BAD_GATEWAY
-            }
-        }
-    } else {
-        StatusCode::OK
-    };
+    if requete.decision == DecisionValidation::Accepte && suite_possible {
+        tache::lancer_pipeline(&etat, &projet.id, tache::Demande::Pipeline);
+    }
 
-    sauvegarder_et_notifier(&etat, &projet).await?;
-    Ok((statut, Json(projet)))
+    Ok((StatusCode::OK, Json(projet)))
 }
 
 /// Corps de `POST /visuel/remplacer`.
@@ -471,14 +476,14 @@ pub struct RequeteAffinage {
 /// relance uniquement les etapes impactees (phase 7).
 ///
 /// Les artefacts et validations des etapes strictement en aval sont invalides
-/// (`pipeline::affiner::reinitialiser_aval`), l'etape est regeneree avec la
-/// consigne, puis `avancer_pipeline` enchaine tant que les portes sont
-/// ouvertes. La validation de l'etape affinee devra etre re-tranchee si sa
-/// porte est en mode `validation`.
+/// (`pipeline::affiner::reinitialiser_aval`) et persistes tels quels, puis la
+/// regeneration et l'enchainement partent en tache de fond
+/// (`tache::lancer_pipeline`) : la reponse est immediate, la progression est
+/// suivie via `GET /projet/{id}` ou le flux SSE. La validation de l'etape
+/// affinee devra etre re-tranchee si sa porte est en mode `validation`.
 ///
 /// Renvoie `404` si le projet est inconnu, `409` s'il n'a pas encore atteint
-/// l'etape demandee, `502` si la regeneration echoue (le projet est alors
-/// persiste en etat `Erreur`).
+/// l'etape demandee ; un echec de regeneration est persiste en etat `Erreur`.
 pub async fn post_affiner(
     State(etat): State<Arc<AppState>>,
     Json(requete): Json<RequeteAffinage>,
@@ -502,33 +507,28 @@ pub async fn post_affiner(
 
     pipeline::affiner::reinitialiser_aval(&mut projet, requete.etape)
         .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
-
-    let statut = match regenerer_etape(&etat, &mut projet, requete.etape, &requete.prompt).await {
-        Ok(()) => match avancer_pipeline(&etat, &mut projet).await {
-            Ok(()) => StatusCode::OK,
-            Err(erreur) => {
-                projet.etat = EtatPipeline::Erreur(erreur.to_string());
-                StatusCode::BAD_GATEWAY
-            }
-        },
-        Err(erreur) => {
-            projet.etat = EtatPipeline::Erreur(erreur.to_string());
-            StatusCode::BAD_GATEWAY
-        }
-    };
-
     sauvegarder_et_notifier(&etat, &projet).await?;
-    Ok((statut, Json(projet)))
+
+    tache::lancer_pipeline(
+        &etat,
+        &projet.id,
+        tache::Demande::Affinage {
+            etape: requete.etape,
+            prompt: requete.prompt,
+        },
+    );
+    Ok((StatusCode::OK, Json(projet)))
 }
 
 /// Regenere le livrable d'une etape avec la consigne d'affinage, une fois
 /// l'aval invalide. Les voix et le montage sont des regenerations mecaniques
 /// (pas de LLM) : la consigne est journalisee, sans effet.
-async fn regenerer_etape(
+pub(crate) async fn regenerer_etape(
     etat: &AppState,
     projet: &mut Projet,
     etape: pipeline::validation::EtapeValidation,
     prompt: &str,
+    token: &CancellationToken,
 ) -> Result<(), Error> {
     match etape {
         pipeline::validation::EtapeValidation::Scenario => {
@@ -549,6 +549,7 @@ async fn regenerer_etape(
                 &etat.config,
                 etat.config.pipeline.visuels,
                 prompt,
+                token,
             )
             .await
         }
@@ -558,7 +559,8 @@ async fn regenerer_etape(
                  consigne journalisee seulement : {prompt}",
                 projet.id
             );
-            agents::conteur::produire_voix(projet, &etat.config, etat.config.pipeline.voix).await
+            agents::conteur::produire_voix(projet, &etat.config, etat.config.pipeline.voix, token)
+                .await
         }
         pipeline::validation::EtapeValidation::Montage => {
             eprintln!(
@@ -566,10 +568,134 @@ async fn regenerer_etape(
                  consigne journalisee seulement : {prompt}",
                 projet.id
             );
-            agents::monteur::produire_montage(projet, &etat.config, etat.config.pipeline.montage)
-                .await
+            agents::monteur::produire_montage(
+                projet,
+                &etat.config,
+                etat.config.pipeline.montage,
+                token,
+            )
+            .await
         }
     }
+}
+
+/// Corps de `POST /annuler` et `POST /reprendre`.
+#[derive(Debug, Deserialize)]
+pub struct RequeteProjet {
+    /// Identifiant du projet.
+    pub id: String,
+}
+
+/// `POST /annuler` : interrompt le traitement d'un projet, a n'importe quelle
+/// etape (phase 8).
+///
+/// Si une tache de pipeline est en cours, son token d'annulation est
+/// declenche : elle s'arrete a son prochain point de controle (entre deux
+/// scenes, deux rendus ffmpeg — le process est alors tue — ou deux chunks
+/// d'upload) et persiste le projet en etat `Annule` ; la reponse est alors
+/// `202`, l'etat `Annule` etant suivi via `GET /projet/{id}` ou le flux SSE.
+/// Sans tache en cours, le projet est marque `Annule` immediatement (`200`).
+///
+/// Un projet annule est reprendable via `POST /reprendre`. Renvoie `404` si
+/// le projet est inconnu, `409` s'il est deja publie ou deja annule.
+pub async fn post_annuler(
+    State(etat): State<Arc<AppState>>,
+    Json(requete): Json<RequeteProjet>,
+) -> Result<(StatusCode, Json<Projet>), ErreurHttp> {
+    if !store::id_valide(&requete.id) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "identifiant de projet invalide".to_string(),
+        ));
+    }
+    let mut projet = match etat.stockage.charger(&requete.id).await {
+        Ok(Some(projet)) => projet,
+        Ok(None) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("projet inconnu : {}", requete.id),
+            ))
+        }
+        Err(e) => return Err(erreur_interne("lecture du projet", e)),
+    };
+    match projet.etat {
+        EtatPipeline::Publie => {
+            return Err((
+                StatusCode::CONFLICT,
+                "projet deja publie : annulation impossible".to_string(),
+            ))
+        }
+        EtatPipeline::Annule => {
+            return Err((StatusCode::CONFLICT, "projet deja annule".to_string()))
+        }
+        _ => {}
+    }
+
+    // Tache en cours ? C'est elle qui persistera `Annule` apres son point de
+    // controle : on se contente de declencher son token.
+    let token = etat
+        .taches
+        .lock()
+        .expect("mutex non empoisonne")
+        .get(&requete.id)
+        .cloned();
+    if let Some(token) = token {
+        token.cancel();
+        return Ok((StatusCode::ACCEPTED, Json(projet)));
+    }
+
+    projet.etat = EtatPipeline::Annule;
+    sauvegarder_et_notifier(&etat, &projet).await?;
+    Ok((StatusCode::OK, Json(projet)))
+}
+
+/// `POST /reprendre` : relance le pipeline d'un projet annule depuis son
+/// dernier point stable (phase 8).
+///
+/// L'etat de reprise est derive des livrables deja produits
+/// (`video_core::annulation::point_de_reprise`) : les etapes abouties ne sont
+/// pas rejouees, les voix deja synthetisees sont reutilisees (cache TTS).
+/// La suite part en tache de fond si une cle API est disponible (ou si seule
+/// la publication reste a faire et que YouTube est configure).
+///
+/// Renvoie `404` si le projet est inconnu, `409` s'il n'est pas en etat
+/// `Annule`.
+pub async fn post_reprendre(
+    State(etat): State<Arc<AppState>>,
+    Json(requete): Json<RequeteProjet>,
+) -> Result<Json<Projet>, ErreurHttp> {
+    if !store::id_valide(&requete.id) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "identifiant de projet invalide".to_string(),
+        ));
+    }
+    let mut projet = match etat.stockage.charger(&requete.id).await {
+        Ok(Some(projet)) => projet,
+        Ok(None) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("projet inconnu : {}", requete.id),
+            ))
+        }
+        Err(e) => return Err(erreur_interne("lecture du projet", e)),
+    };
+    if projet.etat != EtatPipeline::Annule {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("reprise demandee sur un projet en etat {:?}", projet.etat),
+        ));
+    }
+
+    projet.etat = video_core::annulation::point_de_reprise(&projet);
+    sauvegarder_et_notifier(&etat, &projet).await?;
+
+    let suite_possible = etat.cle_api.is_some()
+        || (projet.etat == EtatPipeline::MontagePret && etat.youtube.is_some());
+    if suite_possible {
+        tache::lancer_pipeline(&etat, &projet.id, tache::Demande::Pipeline);
+    }
+    Ok(Json(projet))
 }
 
 /// `GET /projet/{id}/events` : flux SSE (`text/event-stream`) de l'etat d'un
@@ -710,6 +836,7 @@ mod tests {
             stockage,
             scenariste,
             evenements,
+            taches: std::sync::Mutex::new(std::collections::HashMap::new()),
         }))
     }
 
@@ -791,6 +918,28 @@ mod tests {
             .expect("lecture du corps")
             .to_bytes();
         serde_json::from_slice(&octets).expect("corps JSON valide")
+    }
+
+    /// Attend que la tache de fond d'un projet aboutisse : recharge le projet
+    /// en base jusqu'a ce que `predicat` soit vrai (timeout ~5 s).
+    async fn attendre_projet(
+        data_dir: &std::path::Path,
+        id: &str,
+        predicat: impl Fn(&Projet) -> bool,
+    ) -> Projet {
+        let stockage = Stockage::ouvrir(data_dir).await.expect("ouverture");
+        for _ in 0..250 {
+            let projet = stockage
+                .charger(id)
+                .await
+                .expect("chargement")
+                .expect("projet present");
+            if predicat(&projet) {
+                return projet;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("la tache de fond du projet {id} n'a pas abouti avant le timeout");
     }
 
     /// Cree en base un projet en etat `ScenarioGenere`, pret a etre valide.
@@ -1213,16 +1362,24 @@ mod tests {
             ))
             .await
             .expect("reponse");
+        // La decision est enregistree immediatement ; la publication part en
+        // tache de fond.
         assert_eq!(reponse.status(), StatusCode::OK);
         let projet = projet_depuis(reponse).await;
-        assert_eq!(projet.etat, EtatPipeline::Publie);
+        assert_eq!(projet.validation_montage, Some(DecisionValidation::Accepte));
+        assert_eq!(projet.etat, EtatPipeline::MontagePret);
+
+        let projet = attendre_projet(temp.path(), "projetscenario", |p| {
+            p.etat == EtatPipeline::Publie
+        })
+        .await;
         let publication = projet.youtube.expect("publication consignee");
         assert_eq!(publication.id_video, "video123");
         assert_eq!(publication.url, "https://youtu.be/video123");
     }
 
     #[tokio::test]
-    async fn post_valider_montage_echoue_proprement_au_dela_du_quota() {
+    async fn post_valider_montage_marque_le_projet_en_erreur_au_dela_du_quota() {
         let temp = tempfile::tempdir().expect("dossier temporaire");
         let contexte = contexte_youtube_mock().await;
         let app = app_de_test_youtube(temp.path().to_path_buf(), Some(contexte)).await;
@@ -1242,8 +1399,14 @@ mod tests {
             ))
             .await
             .expect("reponse");
-        assert_eq!(reponse.status(), StatusCode::BAD_GATEWAY);
-        let projet = projet_depuis(reponse).await;
+        // La decision est acceptee ; l'echec de publication survient dans la
+        // tache de fond, qui persiste le projet en etat Erreur.
+        assert_eq!(reponse.status(), StatusCode::OK);
+
+        let projet = attendre_projet(temp.path(), "projetscenario", |p| {
+            matches!(p.etat, EtatPipeline::Erreur(_))
+        })
+        .await;
         match &projet.etat {
             EtatPipeline::Erreur(message) => assert!(message.contains("quota"), "{message}"),
             autre => panic!("un etat Erreur est attendu, pas {autre:?}"),
@@ -1576,16 +1739,12 @@ mod tests {
             ))
             .await
             .expect("reponse");
+        // L'aval est invalide immediatement ; la regeneration part en tache
+        // de fond (le projet est au point de reprise du scenario).
         assert_eq!(reponse.status(), StatusCode::OK);
         let projet = projet_depuis(reponse).await;
-
-        // Le scenario est regenere et l'etat repart a ScenarioGenere (mode
-        // validation par defaut : la decision devra etre re-tranchee).
-        assert_eq!(projet.etat, EtatPipeline::ScenarioGenere);
-        let scenario = projet.scenario.expect("scenario regenere");
-        assert_eq!(scenario.titre, "Scenario affine");
+        assert_eq!(projet.etat, EtatPipeline::Transcrit);
         assert_eq!(projet.validation_scenario, None);
-        // Tout l'aval est invalide : seules les etapes impactees repartent.
         assert!(projet.visuels.is_empty());
         assert_eq!(projet.validation_visuels, None);
         assert!(projet.voix.is_empty());
@@ -1595,6 +1754,16 @@ mod tests {
         assert_eq!(projet.preview, None);
         assert_eq!(projet.validation_montage, None);
         assert_eq!(projet.youtube, None);
+
+        // Le scenario est regenere et l'etat repart a ScenarioGenere (mode
+        // validation par defaut : la decision devra etre re-tranchee).
+        let projet = attendre_projet(temp.path(), "projetscenario", |p| {
+            p.etat == EtatPipeline::ScenarioGenere
+        })
+        .await;
+        let scenario = projet.scenario.expect("scenario regenere");
+        assert_eq!(scenario.titre, "Scenario affine");
+        assert_eq!(projet.validation_scenario, None);
 
         // La demande au Scenariste contient le scenario actuel et la consigne.
         let demandes = scenariste.demandes.lock().expect("mutex non empoisonne");
@@ -1608,7 +1777,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_affiner_scenario_sans_scenariste_renvoie_502() {
+    async fn post_affiner_scenario_sans_scenariste_marque_le_projet_en_erreur() {
         let temp = tempfile::tempdir().expect("dossier temporaire");
         // app_de_test : pas de Scenariste injecte (cle API absente).
         let app = app_de_test(temp.path().to_path_buf()).await;
@@ -1618,8 +1787,14 @@ mod tests {
             .oneshot(requete_affinage("projetscenario", "scenario", "Raccourcis"))
             .await
             .expect("reponse");
-        assert_eq!(reponse.status(), StatusCode::BAD_GATEWAY);
-        let projet = projet_depuis(reponse).await;
+        // La reponse est immediate ; l'echec de regeneration survient dans la
+        // tache de fond, qui persiste le projet en etat Erreur.
+        assert_eq!(reponse.status(), StatusCode::OK);
+
+        let projet = attendre_projet(temp.path(), "projetscenario", |p| {
+            matches!(p.etat, EtatPipeline::Erreur(_))
+        })
+        .await;
         match &projet.etat {
             EtatPipeline::Erreur(message) => {
                 assert!(message.contains("MISTRAL_API_KEY"), "{message}")
@@ -1741,12 +1916,20 @@ mod tests {
             ))
             .await
             .expect("reponse");
+        // L'aval (publication) est invalide immediatement ; la regeneration
+        // du montage part en tache de fond.
         assert_eq!(reponse.status(), StatusCode::OK);
         let projet = projet_depuis(reponse).await;
+        assert_eq!(projet.etat, EtatPipeline::VoixPretes);
+        assert_eq!(projet.validation_montage, None);
+        assert_eq!(projet.youtube, None);
 
         // Le montage est regenere (mode validation par defaut : la decision
-        // devra etre re-tranchee), la publication est invalidee.
-        assert_eq!(projet.etat, EtatPipeline::MontagePret);
+        // devra etre re-tranchee).
+        let projet = attendre_projet(temp.path(), "projetscenario", |p| {
+            p.etat == EtatPipeline::MontagePret
+        })
+        .await;
         assert_eq!(projet.video.as_deref(), Some("video.mp4"));
         assert_eq!(projet.preview.as_deref(), Some("preview.mp4"));
         assert_eq!(projet.validation_montage, None);
@@ -1837,5 +2020,221 @@ mod tests {
             .await
             .expect("reponse");
         assert_eq!(reponse.status(), StatusCode::NOT_FOUND);
+    }
+
+    // --- Phase 8 : annulation et reprise -------------------------------------
+
+    /// Construit une requete `POST /annuler` ou `POST /reprendre`.
+    fn requete_projet(chemin: &str, id: &str) -> Request<Body> {
+        Request::post(chemin)
+            .header("content-type", "application/json")
+            .body(Body::from(format!(r#"{{ "id": "{id}" }}"#)))
+            .expect("construction de la requete")
+    }
+
+    #[tokio::test]
+    async fn post_annuler_marque_un_projet_au_repos() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+        semer_projet_scenario(temp.path()).await;
+
+        let reponse = app
+            .oneshot(requete_projet("/annuler", "projetscenario"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::OK);
+        let projet = projet_depuis(reponse).await;
+        assert_eq!(projet.etat, EtatPipeline::Annule);
+        // Le scenario produit est conserve pour la reprise.
+        assert!(projet.scenario.is_some());
+
+        // L'etat est bien persiste.
+        let stockage = Stockage::ouvrir(temp.path()).await.expect("ouverture");
+        let relu = stockage
+            .charger("projetscenario")
+            .await
+            .expect("chargement")
+            .expect("projet present");
+        assert_eq!(relu.etat, EtatPipeline::Annule);
+    }
+
+    #[tokio::test]
+    async fn post_annuler_refuse_un_projet_publie() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+        semer_projet_publie(temp.path()).await;
+
+        let reponse = app
+            .oneshot(requete_projet("/annuler", "projetscenario"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn post_annuler_refuse_un_projet_deja_annule() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+        semer_projet_scenario(temp.path()).await;
+
+        let reponse = app
+            .clone()
+            .oneshot(requete_projet("/annuler", "projetscenario"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::OK);
+
+        let reponse = app
+            .oneshot(requete_projet("/annuler", "projetscenario"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn post_annuler_projet_inconnu_renvoie_404() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+
+        let reponse = app
+            .oneshot(requete_projet("/annuler", "inconnu123"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn post_reprendre_replace_le_projet_a_son_point_stable() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+        semer_projet_visuels(temp.path()).await;
+
+        let reponse = app
+            .clone()
+            .oneshot(requete_projet("/annuler", "projetscenario"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::OK);
+
+        let reponse = app
+            .oneshot(requete_projet("/reprendre", "projetscenario"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::OK);
+        let projet = projet_depuis(reponse).await;
+        // Point de reprise derive des livrables : les visuels sont produits.
+        assert_eq!(projet.etat, EtatPipeline::VisuelsPrets);
+        assert_eq!(projet.visuels.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn post_reprendre_refuse_un_projet_non_annule() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+        semer_projet_scenario(temp.path()).await;
+
+        let reponse = app
+            .oneshot(requete_projet("/reprendre", "projetscenario"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn post_reprendre_projet_inconnu_renvoie_404() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let app = app_de_test(temp.path().to_path_buf()).await;
+
+        let reponse = app
+            .oneshot(requete_projet("/reprendre", "inconnu123"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Scenariste bloquant : le premier appel attend d'etre relache par le
+    /// test, ce qui maintient une tache d'affinage en cours d'execution.
+    struct ScenaristeBloquant {
+        debut: Arc<tokio::sync::Notify>,
+        relacher: Arc<tokio::sync::Notify>,
+        appele: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl llm::scenariste::ExtracteurScenario for ScenaristeBloquant {
+        fn extraire(&self, _demande: String) -> llm::scenariste::FuturScenario<'_> {
+            let premiere_fois = !self.appele.swap(true, std::sync::atomic::Ordering::SeqCst);
+            self.debut.notify_one();
+            let relacher = self.relacher.clone();
+            Box::pin(async move {
+                if premiere_fois {
+                    relacher.notified().await;
+                }
+                Ok(Scenario {
+                    titre: "Scenario affine".to_string(),
+                    public: "tout public".to_string(),
+                    style_images: "photos".to_string(),
+                    scenes: vec![Scene {
+                        narration: "Version corrigee.".to_string(),
+                        dialogues: vec![],
+                        description_visuelle: "Visuel corrige".to_string(),
+                        duree_cible: 6.0,
+                    }],
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn post_annuler_interrompt_une_tache_en_cours() {
+        let temp = tempfile::tempdir().expect("dossier temporaire");
+        let debut = Arc::new(tokio::sync::Notify::new());
+        let relacher = Arc::new(tokio::sync::Notify::new());
+        let scenariste = Arc::new(ScenaristeBloquant {
+            debut: debut.clone(),
+            relacher: relacher.clone(),
+            appele: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        let app = app_de_test_avec_scenariste(temp.path().to_path_buf(), scenariste).await;
+        semer_projet_publie(temp.path()).await;
+
+        // La tache d'affinage demarre et se bloque dans le Scenariste.
+        let reponse = app
+            .clone()
+            .oneshot(requete_affinage("projetscenario", "scenario", "Raccourcis"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::OK);
+        tokio::time::timeout(std::time::Duration::from_secs(5), debut.notified())
+            .await
+            .expect("la tache a demarre avant le timeout");
+
+        // Annulation pendant que la tache tourne : 202, la tache persistera
+        // `Annule` a son prochain point de controle.
+        let reponse = app
+            .oneshot(requete_projet("/annuler", "projetscenario"))
+            .await
+            .expect("reponse");
+        assert_eq!(reponse.status(), StatusCode::ACCEPTED);
+
+        // La tache se termine : le projet est persiste en etat Annule.
+        relacher.notify_one();
+        let projet = attendre_projet(temp.path(), "projetscenario", |p| {
+            p.etat == EtatPipeline::Annule
+        })
+        .await;
+        assert!(projet.scenario.is_some());
+
+        // Et le projet est reprendable a son point stable : le scenario
+        // regenere est produit, l'aval a ete invalide par l'affinage.
+        let stockage = Stockage::ouvrir(temp.path()).await.expect("ouverture");
+        let relu = stockage
+            .charger("projetscenario")
+            .await
+            .expect("chargement")
+            .expect("projet present");
+        assert_eq!(
+            video_core::annulation::point_de_reprise(&relu),
+            EtatPipeline::ScenarioGenere
+        );
     }
 }

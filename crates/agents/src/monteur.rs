@@ -57,6 +57,10 @@ pub async fn produire_montage(
         .scenario
         .clone()
         .ok_or_else(|| Error::Pipeline("projet sans scenario".to_string()))?;
+    // Annulation verifiee avant tout travail externe : une demande d'arret
+    // doit court-circuiter l'etape meme si la sonde ffmpeg est en echec
+    // transitoire (spawn sous charge), pas seulement entre deux rendus.
+    point_de_controle(token)?;
     if !ffmpeg::ffmpeg_disponible().await {
         return Err(Error::Tool(
             "ffmpeg est introuvable : installez-le pour activer le montage".to_string(),

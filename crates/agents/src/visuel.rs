@@ -42,21 +42,30 @@ pub async fn produire_visuels<M: CompletionModel + 'static>(
     agent: &Agent<M>,
     images_choisies: &ImagesChoisies,
     mode: ModeTransition,
+    dossier_repli: Option<&std::path::Path>,
     token: &CancellationToken,
 ) -> Result<(), Error> {
-    produire_visuels_avec_consigne(projet, agent, images_choisies, mode, None, token).await
+    produire_visuels_avec_consigne(projet, agent, images_choisies, mode, None, dossier_repli, token)
+        .await
 }
 
 /// Implementation de [`produire_visuels`], avec en option une consigne
 /// d'affinage de l'utilisateur integree a la consigne de chaque scene : elle
 /// guide la regeneration des requetes de recherche d'images (phase 7,
 /// `POST /affiner`).
+///
+/// `dossier_repli` est le dossier de donnees du projet : quand la boucle
+/// agent/outil n'a produit aucune image pour une scene malgre les
+/// tentatives, une recherche directe (sans LLM, a partir de la description
+/// de la scene) illustre la scene plutot que d'echouer. `None` desactive ce
+/// repli (tests).
 pub async fn produire_visuels_avec_consigne<M: CompletionModel + 'static>(
     projet: &mut Projet,
     agent: &Agent<M>,
     images_choisies: &ImagesChoisies,
     mode: ModeTransition,
     consigne_affinage: Option<&str>,
+    dossier_repli: Option<&std::path::Path>,
     token: &CancellationToken,
 ) -> Result<(), Error> {
     if projet.etat != EtatPipeline::ScenarioGenere {
@@ -91,20 +100,40 @@ pub async fn produire_visuels_avec_consigne<M: CompletionModel + 'static>(
             ));
         }
         consigne.push_str("Appelle choisir_image pour illustrer cette scene.");
-        if let Err(erreur) = prompter_avec_nouvelles_tentatives(agent, &consigne).await {
-            // Le modele appelle parfois l'outil plusieurs fois par scene et
-            // epuse ses tours (MaxTurnsError) : l'image a quand meme ete
-            // telechargee, la scene est illustree — on l'accepte.
-            let scene_illustree = images_choisies
-                .lock()
-                .expect("mutex non empoisonne")
-                .iter()
-                .any(|a| a.scene == index);
-            if !scene_illustree {
+        let resultat = prompter_avec_nouvelles_tentatives(agent, &consigne, images_choisies, index)
+            .await;
+        if !scene_illustree(images_choisies, index) {
+            if let Some(dossier) = dossier_repli {
+                // Repli deterministe, sans LLM : la generation doit aboutir
+                // meme si le modele n'a appele l'outil correctement aucune
+                // fois. La requete reprend la description de la scene (moins
+                // ciblee qu'une traduction par le LLM, remplacable ensuite en
+                // mode validation).
+                let http = tools::images::client_http()?;
+                let asset = tools::images::choisir_image(
+                    &http,
+                    dossier,
+                    index,
+                    &scene.description_visuelle,
+                    &scenario.style_images,
+                )
+                .await
+                .map_err(|e| {
+                    Error::Llm(format!(
+                        "choix de l'image de la scene {index} (repli direct apres echec LLM) : {e}"
+                    ))
+                })?;
+                images_choisies
+                    .lock()
+                    .expect("mutex non empoisonne")
+                    .push(asset);
+            } else if let Err(erreur) = resultat {
                 return Err(Error::Llm(format!(
                     "choix de l'image de la scene {index} : {erreur}"
                 )));
             }
+            // Sans repli et sans erreur LLM : la verification finale
+            // (« scene restee sans image ») tranchera.
         }
     }
 
@@ -130,14 +159,23 @@ pub async fn produire_visuels_avec_consigne<M: CompletionModel + 'static>(
 }
 
 /// Lance la boucle agent/outil d'une scene, avec nouvelles tentatives sur les
-/// erreurs transitoires cote LLM : un nom d'outil malforme (ex.
-/// `fasterxmlchoisir_image`) est rejoue immediatement, un rate-limit (429)
-/// apres une pause exponentielle qui laisse le quota se rouvrir. Les autres
-/// erreurs (reseau, outil en echec) remontent sans reessai.
+/// erreurs transitoires cote LLM : nom d'outil malforme (ex.
+/// `fasterxmlchoisir_image`) et `MaxTurnsError` sont rejoues immediatement,
+/// un rate-limit (429) apres une pause exponentielle qui laisse le quota se
+/// rouvrir. Une erreur survenue alors que l'image de la scene a quand meme
+/// ete telechargee (modele qui appelle l'outil en boucle) est ignoree : la
+/// scene est illustree, c'est l'essentiel. Les autres erreurs (reseau, outil
+/// en echec) remontent sans reessai.
+///
+/// `Ok(())` ne garantit pas qu'une image a ete choisie (le modele peut
+/// cloturer sans appeler l'outil) : l'appelant verifie via
+/// [`scene_illustree`] et bascule sur le repli direct le cas echeant.
 async fn prompter_avec_nouvelles_tentatives<M: CompletionModel + 'static>(
     agent: &Agent<M>,
     consigne: &str,
-) -> Result<String, llm::PromptError> {
+    images_choisies: &ImagesChoisies,
+    scene: usize,
+) -> Result<(), llm::PromptError> {
     let mut tentative = 0;
     let mut pause = PAUSE_RATE_LIMIT;
     loop {
@@ -147,18 +185,34 @@ async fn prompter_avec_nouvelles_tentatives<M: CompletionModel + 'static>(
             .max_turns(TOURS_MAX_PAR_SCENE as usize)
             .await
         {
-            Ok(reponse) => return Ok(reponse),
-            Err(erreur)
-                if tentative < TENTATIVES_MAX_PAR_SCENE && est_outil_inconnu(&erreur) => {}
-            Err(erreur)
-                if tentative < TENTATIVES_MAX_PAR_SCENE && est_rate_limit(&erreur) =>
-            {
-                tokio::time::sleep(pause).await;
-                pause *= 2;
+            Ok(_) => return Ok(()),
+            Err(erreur) => {
+                if scene_illustree(images_choisies, scene) {
+                    return Ok(());
+                }
+                let rejouer = tentative < TENTATIVES_MAX_PAR_SCENE
+                    && (est_outil_inconnu(&erreur)
+                        || est_rate_limit(&erreur)
+                        || est_max_turns(&erreur));
+                if !rejouer {
+                    return Err(erreur);
+                }
+                if est_rate_limit(&erreur) {
+                    tokio::time::sleep(pause).await;
+                    pause *= 2;
+                }
             }
-            Err(erreur) => return Err(erreur),
         }
     }
+}
+
+/// La scene a-t-elle deja une image dans le collecteur partage ?
+fn scene_illustree(images_choisies: &ImagesChoisies, scene: usize) -> bool {
+    images_choisies
+        .lock()
+        .expect("mutex non empoisonne")
+        .iter()
+        .any(|a| a.scene == scene)
 }
 
 /// Detecte l'erreur transitoire « le modele a appele un outil inconnu » dans
@@ -171,6 +225,12 @@ fn est_outil_inconnu(erreur: &impl std::fmt::Display) -> bool {
 /// transitoire, le quota se rouvre apres une pause.
 fn est_rate_limit(erreur: &impl std::fmt::Display) -> bool {
     erreur.to_string().contains("429")
+}
+
+/// Detecte l'epuisement des tours de la boucle agent/outil : sans image
+/// choisie, rejouer la consigne repart sur des bases saines.
+fn est_max_turns(erreur: &impl std::fmt::Display) -> bool {
+    erreur.to_string().contains("MaxTurnsError")
 }
 
 /// Construit l'agent Visuel et son outil depuis la configuration du projet,
@@ -186,7 +246,8 @@ pub async fn produire_visuels_depuis_config(
     token: &CancellationToken,
 ) -> Result<(), Error> {
     let (agent, images_choisies) = construire_agent(config, projet)?;
-    produire_visuels(projet, &agent, &images_choisies, mode, token).await
+    let dossier = config.data_dir.join(&projet.id);
+    produire_visuels(projet, &agent, &images_choisies, mode, Some(&dossier), token).await
 }
 
 /// Regenere tous les visuels en integrant une consigne d'affinage de
@@ -202,12 +263,14 @@ pub async fn affiner_visuels_depuis_config(
     token: &CancellationToken,
 ) -> Result<(), Error> {
     let (agent, images_choisies) = construire_agent(config, projet)?;
+    let dossier = config.data_dir.join(&projet.id);
     produire_visuels_avec_consigne(
         projet,
         &agent,
         &images_choisies,
         mode,
         Some(consigne),
+        Some(&dossier),
         token,
     )
     .await
@@ -510,6 +573,7 @@ mod tests {
             &choisies,
             ModeTransition::Validation,
             Some("Plutot des photos de nuit"),
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -537,6 +601,7 @@ mod tests {
             &agent,
             &choisies,
             ModeTransition::Validation,
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -560,6 +625,7 @@ mod tests {
             &agent,
             &choisies,
             ModeTransition::Auto,
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -580,6 +646,7 @@ mod tests {
             &agent,
             &choisies,
             ModeTransition::Validation,
+            None,
             &CancellationToken::new(),
         )
         .await;
@@ -617,6 +684,7 @@ mod tests {
             &agent,
             &choisies,
             ModeTransition::Validation,
+            None,
             &CancellationToken::new(),
         )
         .await;
@@ -654,6 +722,7 @@ mod tests {
             &agent,
             &choisies,
             ModeTransition::Validation,
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -691,6 +760,7 @@ mod tests {
             &agent,
             &choisies,
             ModeTransition::Validation,
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -726,6 +796,7 @@ mod tests {
             &agent,
             &choisies,
             ModeTransition::Validation,
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -761,6 +832,7 @@ mod tests {
             &agent,
             &choisies,
             ModeTransition::Validation,
+            None,
             &CancellationToken::new(),
         )
         .await;
@@ -784,6 +856,7 @@ mod tests {
             &agent,
             &choisies,
             ModeTransition::Validation,
+            None,
             &token,
         )
         .await;

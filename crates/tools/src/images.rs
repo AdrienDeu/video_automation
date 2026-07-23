@@ -32,6 +32,76 @@ const TAILLE_MAX_TELECHARGEMENT: usize = 20 * 1024 * 1024;
 /// Extensions d'images exploitables par ffmpeg en phase 5 (pas de SVG/GIF).
 const EXTENSIONS_IMAGE: &[&str] = &["jpg", "jpeg", "png", "webp"];
 
+/// Mots vides usuels du francais, ignores a l'extraction de mots-cles.
+const MOTS_VIDES: &[&str] = &[
+    "dans", "avec", "sans", "sont", "cote", "côte", "sous", "pour", "plus", "tres", "entre",
+    "chaque", "cette", "leurs", "etre", "par", "les", "des", "une", "aux", "sur", "est", "ces",
+    "ses", "trois", "aussi", "ainsi",
+];
+
+/// Extrait jusqu'a `n` mots-cles discriminants d'une description : mots
+/// alphabetiques d'au moins 4 caracteres, hors mots vides, tries par longueur
+/// decroissante (les plus specifiques d'abord), en minuscules et sans doublon.
+pub fn mots_cles(description: &str, n: usize) -> Vec<String> {
+    let mut mots: Vec<String> = description
+        .split(|c: char| !c.is_alphabetic())
+        .filter(|m| m.len() >= 4)
+        .map(str::to_lowercase)
+        .filter(|m| !MOTS_VIDES.contains(&m.as_str()))
+        .collect();
+    mots.sort_by_key(|m| std::cmp::Reverse(m.len()));
+    mots.dedup();
+    mots.truncate(n);
+    mots
+}
+
+/// Recherche d'image en mode degrade (repli sans LLM, quand la boucle
+/// agent/outil n'a produit aucune image) : essaie des requetes de la plus
+/// precise a la plus generique — mots-cles extraits de la description de la
+/// scene, puis le style — et retourne la premiere image trouvee.
+///
+/// Les descriptions sont en francais alors que les sources sont indexees
+/// majoritairement en anglais : des requetes courtes maximisent le rappel.
+///
+/// # Erreurs
+/// `Error::Tool` si aucune requete de la cascade ne produit d'image.
+pub async fn choisir_image_degrade(
+    http: &reqwest::Client,
+    dossier: &Path,
+    scene: usize,
+    description: &str,
+    style: &str,
+) -> Result<Asset, Error> {
+    let cles = mots_cles(description, 4);
+    let mut requetes: Vec<String> = Vec::new();
+    if cles.len() >= 3 {
+        requetes.push(cles.join(" "));
+    }
+    if let Some(deux) = cles.get(..2) {
+        requetes.push(deux.join(" "));
+    }
+    if let Some(premier) = cles.first() {
+        requetes.push(premier.clone());
+    }
+    let style = style.trim();
+    if !style.is_empty() {
+        requetes.push(style.to_string());
+    }
+    requetes.dedup();
+
+    let mut derniere_erreur = None;
+    for requete in &requetes {
+        match choisir_image(http, dossier, scene, requete, style).await {
+            Ok(asset) => return Ok(asset),
+            Err(e) => derniere_erreur = Some(format!("« {requete} » : {e}")),
+        }
+    }
+    Err(Error::Tool(format!(
+        "repli degrade sans resultat ({})",
+        derniere_erreur.unwrap_or_else(|| "aucune requete exploitable".to_string())
+    )))
+}
+
 /// Un candidat image issu d'une des deux sources, avant telechargement.
 #[derive(Debug, Clone)]
 pub struct CandidatImage {
@@ -435,6 +505,26 @@ mod tests {
         assert!(!licence_acceptee("by-sa"));
         assert!(!licence_acceptee("CC BY-NC 2.0"));
         assert!(!licence_acceptee("by-nc-nd"));
+    }
+
+    #[test]
+    fn extrait_les_mots_cles_discriminants() {
+        let cles = mots_cles(
+            "Pièce sombre aux murs de pierre, éclairée par une lumière douce. \
+             Trois illustrations médiévales sont accrochées côte à côte.",
+            4,
+        );
+        // Mots vides et mots courts ignores, longueur decroissante, sans doublon.
+        assert_eq!(cles.len(), 4);
+        assert_eq!(cles[0], "illustrations");
+        assert!(cles.contains(&"médiévales".to_string()));
+        assert!(!cles.iter().any(|m| m == "trois" || m == "sont" || m == "aux"));
+        let mut sans_doublon = cles.clone();
+        sans_doublon.dedup();
+        assert_eq!(cles, sans_doublon);
+
+        // Description vide : aucun mot-cle, pas de panique.
+        assert!(mots_cles("", 4).is_empty());
     }
 
     #[test]

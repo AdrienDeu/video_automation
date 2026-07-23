@@ -106,11 +106,11 @@ pub async fn produire_visuels_avec_consigne<M: CompletionModel + 'static>(
             if let Some(dossier) = dossier_repli {
                 // Repli deterministe, sans LLM : la generation doit aboutir
                 // meme si le modele n'a appele l'outil correctement aucune
-                // fois. La requete reprend la description de la scene (moins
-                // ciblee qu'une traduction par le LLM, remplacable ensuite en
-                // mode validation).
+                // fois. Recherche en cascade a partir de mots-cles extraits
+                // de la description (moins ciblee qu'une traduction par le
+                // LLM, remplacable ensuite en mode validation).
                 let http = tools::images::client_http()?;
-                let asset = tools::images::choisir_image(
+                let asset = tools::images::choisir_image_degrade(
                     &http,
                     dossier,
                     index,

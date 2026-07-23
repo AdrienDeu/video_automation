@@ -85,9 +85,10 @@ impl Default for AudioConfig {
 pub struct VoixConfig {
     /// URL de l'endpoint TTS.
     pub url: String,
-    /// Modele TTS, ex. `voxtral-mini-tts`.
+    /// Modele TTS, ex. `voxtral-mini-tts-2603`.
     pub modele: String,
-    /// Voix utilisee pour la narration.
+    /// Voix utilisee pour la narration : slug ou UUID d'une voix du compte
+    /// (liste via `GET /v1/audio/voices`).
     pub voix: String,
 }
 
@@ -95,8 +96,8 @@ impl Default for VoixConfig {
     fn default() -> Self {
         Self {
             url: "https://api.mistral.ai/v1/audio/speech".to_string(),
-            modele: "voxtral-mini-tts".to_string(),
-            voix: "default".to_string(),
+            modele: "voxtral-mini-tts-2603".to_string(),
+            voix: "en_paul_neutral".to_string(),
         }
     }
 }

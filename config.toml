@@ -21,11 +21,12 @@ voix = "validation"
 montage = "validation"
 
 [voix]
-# Endpoint TTS (compatible OpenAI /v1/audio/speech ; hypothese phase 4,
-# l'API Voxtral TTS n'etant pas figee publiquement).
+# Endpoint TTS Voxtral (verifie contre l'API en juillet 2026 : JSON
+# { model, input, voice, response_format } -> JSON { audio_data } en base64).
+# voix : slug ou UUID d'une voix du compte (GET /v1/audio/voices).
 url = "https://api.mistral.ai/v1/audio/speech"
-modele = "voxtral-mini-tts"
-voix = "default"
+modele = "voxtral-mini-tts-2603"
+voix = "en_paul_neutral"
 
 [youtube]
 # Visibilite des videos publiees : "private" (defaut prudent), "unlisted"

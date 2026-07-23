@@ -2503,6 +2503,7 @@ name = "tools"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "base64",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

@@ -1,12 +1,11 @@
 //! Outil `generer_voix` : synthese vocale (TTS) multi-langue via l'API
-//! Mistral (Voxtral TTS, modele `voxtral-mini-tts`), phase 4.
+//! Mistral (Voxtral TTS, modele `voxtral-mini-tts-2603`), phase 4.
 //!
-//! **Hypothese d'endpoint** : la forme exacte de l'API Voxtral TTS n'etant
-//! pas figee publiquement au moment de la phase 4, le client suppose un
-//! endpoint compatible OpenAI `POST /v1/audio/speech` : JSON
-//! `{ model, input, voice, response_format }` en entree, octets audio en
-//! sortie. L'URL est configurable (`[voix] url` dans `config.toml`) pour
-//! s'ajuster sans toucher au code.
+//! Forme de l'API (verifiee contre `POST /v1/audio/speech` en juillet 2026) :
+//! JSON `{ model, input, voice, response_format }` en entree — `voice` est le
+//! slug ou l'UUID d'une voix du compte (`GET /v1/audio/voices`) — et JSON
+//! `{ "audio_data": "<base64>" }` en sortie. L'URL est configurable
+//! (`[voix] url` dans `config.toml`).
 //!
 //! **Cache par hash** : le nom du fichier audio est derive d'un hash stable
 //! du texte, de la langue, de la voix et du modele (`voix-<hash>.mp3` dans le
@@ -43,13 +42,13 @@ pub fn client_http() -> Result<reqwest::Client, Error> {
         .map_err(|e| Error::Tool(format!("construction du client HTTP : {e}")))
 }
 
-/// Requete JSON de l'endpoint TTS (champs anglais, convention OpenAI).
+/// Requete JSON de l'endpoint TTS (champs confirmes par l'API ; `language`
+/// n'existe pas cote serveur, la langue suit le texte et la voix).
 #[derive(Debug, Serialize)]
 struct RequeteTts<'a> {
     model: &'a str,
     input: &'a str,
     voice: &'a str,
-    language: &'a str,
     response_format: &'a str,
 }
 
@@ -141,7 +140,6 @@ pub async fn generer_voix(
             model: &config.modele,
             input: texte,
             voice: &config.voix,
-            language: langue,
             response_format: "mp3",
         };
         let reponse = http
@@ -158,10 +156,22 @@ pub async fn generer_voix(
                 "l'API de synthese vocale a repondu {statut} : {detail}"
             )));
         }
-        let octets = reponse
-            .bytes()
+        // Reponse JSON : l'audio MP3 est dans le champ `audio_data`, en base64.
+        let corps: serde_json::Value = reponse
+            .json()
             .await
-            .map_err(|e| Error::Tool(format!("lecture de l'audio synthetise : {e}")))?;
+            .map_err(|e| Error::Tool(format!("lecture de la reponse TTS : {e}")))?;
+        let audio_base64 = corps
+            .get("audio_data")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                Error::Tool("reponse TTS sans champ « audio_data »".to_string())
+            })?;
+        let octets = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            audio_base64,
+        )
+        .map_err(|e| Error::Tool(format!("audio TTS invalide (base64) : {e}")))?;
         if octets.is_empty() {
             return Err(Error::Tool(
                 "l'API de synthese vocale a renvoye un audio vide".to_string(),
@@ -184,24 +194,24 @@ mod tests {
 
     #[test]
     fn le_hash_est_stable_et_sensible_aux_entrees() {
-        let reference = hash_voix("Bonjour le monde.", "fr", "default", "voxtral-mini-tts");
+        let reference = hash_voix("Bonjour le monde.", "fr", "default", "voxtral-mini-tts-2603");
         // Deterministe : meme entrees, meme hash.
         assert_eq!(
-            hash_voix("Bonjour le monde.", "fr", "default", "voxtral-mini-tts"),
+            hash_voix("Bonjour le monde.", "fr", "default", "voxtral-mini-tts-2603"),
             reference
         );
         assert_eq!(reference.len(), 16);
         // Sensible a chaque entree.
         assert_ne!(
-            hash_voix("Bonjour le monde!", "fr", "default", "voxtral-mini-tts"),
+            hash_voix("Bonjour le monde!", "fr", "default", "voxtral-mini-tts-2603"),
             reference
         );
         assert_ne!(
-            hash_voix("Bonjour le monde.", "en", "default", "voxtral-mini-tts"),
+            hash_voix("Bonjour le monde.", "en", "default", "voxtral-mini-tts-2603"),
             reference
         );
         assert_ne!(
-            hash_voix("Bonjour le monde.", "fr", "autre", "voxtral-mini-tts"),
+            hash_voix("Bonjour le monde.", "fr", "autre", "voxtral-mini-tts-2603"),
             reference
         );
         assert_ne!(
@@ -218,7 +228,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("dossier temporaire");
         let config = VoixConfig {
             url: "http://127.0.0.1:1/injoignable".to_string(),
-            modele: "voxtral-mini-tts".to_string(),
+            modele: "voxtral-mini-tts-2603".to_string(),
             voix: "default".to_string(),
         };
         let nom = format!(

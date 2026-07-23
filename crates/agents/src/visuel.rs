@@ -45,8 +45,16 @@ pub async fn produire_visuels<M: CompletionModel + 'static>(
     dossier_repli: Option<&std::path::Path>,
     token: &CancellationToken,
 ) -> Result<(), Error> {
-    produire_visuels_avec_consigne(projet, agent, images_choisies, mode, None, dossier_repli, token)
-        .await
+    produire_visuels_avec_consigne(
+        projet,
+        agent,
+        images_choisies,
+        mode,
+        None,
+        dossier_repli,
+        token,
+    )
+    .await
 }
 
 /// Implementation de [`produire_visuels`], avec en option une consigne
@@ -100,8 +108,8 @@ pub async fn produire_visuels_avec_consigne<M: CompletionModel + 'static>(
             ));
         }
         consigne.push_str("Appelle choisir_image pour illustrer cette scene.");
-        let resultat = prompter_avec_nouvelles_tentatives(agent, &consigne, images_choisies, index)
-            .await;
+        let resultat =
+            prompter_avec_nouvelles_tentatives(agent, &consigne, images_choisies, index).await;
         if !scene_illustree(images_choisies, index) {
             if let Some(dossier) = dossier_repli {
                 // Repli deterministe, sans LLM : la generation doit aboutir
@@ -247,7 +255,15 @@ pub async fn produire_visuels_depuis_config(
 ) -> Result<(), Error> {
     let (agent, images_choisies) = construire_agent(config, projet)?;
     let dossier = config.data_dir.join(&projet.id);
-    produire_visuels(projet, &agent, &images_choisies, mode, Some(&dossier), token).await
+    produire_visuels(
+        projet,
+        &agent,
+        &images_choisies,
+        mode,
+        Some(&dossier),
+        token,
+    )
+    .await
 }
 
 /// Regenere tous les visuels en integrant une consigne d'affinage de

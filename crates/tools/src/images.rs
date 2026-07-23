@@ -518,7 +518,9 @@ mod tests {
         assert_eq!(cles.len(), 4);
         assert_eq!(cles[0], "illustrations");
         assert!(cles.contains(&"médiévales".to_string()));
-        assert!(!cles.iter().any(|m| m == "trois" || m == "sont" || m == "aux"));
+        assert!(!cles
+            .iter()
+            .any(|m| m == "trois" || m == "sont" || m == "aux"));
         let mut sans_doublon = cles.clone();
         sans_doublon.dedup();
         assert_eq!(cles, sans_doublon);

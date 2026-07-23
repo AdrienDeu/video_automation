@@ -164,14 +164,10 @@ pub async fn generer_voix(
         let audio_base64 = corps
             .get("audio_data")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                Error::Tool("reponse TTS sans champ « audio_data »".to_string())
-            })?;
-        let octets = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            audio_base64,
-        )
-        .map_err(|e| Error::Tool(format!("audio TTS invalide (base64) : {e}")))?;
+            .ok_or_else(|| Error::Tool("reponse TTS sans champ « audio_data »".to_string()))?;
+        let octets =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, audio_base64)
+                .map_err(|e| Error::Tool(format!("audio TTS invalide (base64) : {e}")))?;
         if octets.is_empty() {
             return Err(Error::Tool(
                 "l'API de synthese vocale a renvoye un audio vide".to_string(),
@@ -194,20 +190,40 @@ mod tests {
 
     #[test]
     fn le_hash_est_stable_et_sensible_aux_entrees() {
-        let reference = hash_voix("Bonjour le monde.", "fr", "default", "voxtral-mini-tts-2603");
+        let reference = hash_voix(
+            "Bonjour le monde.",
+            "fr",
+            "default",
+            "voxtral-mini-tts-2603",
+        );
         // Deterministe : meme entrees, meme hash.
         assert_eq!(
-            hash_voix("Bonjour le monde.", "fr", "default", "voxtral-mini-tts-2603"),
+            hash_voix(
+                "Bonjour le monde.",
+                "fr",
+                "default",
+                "voxtral-mini-tts-2603"
+            ),
             reference
         );
         assert_eq!(reference.len(), 16);
         // Sensible a chaque entree.
         assert_ne!(
-            hash_voix("Bonjour le monde!", "fr", "default", "voxtral-mini-tts-2603"),
+            hash_voix(
+                "Bonjour le monde!",
+                "fr",
+                "default",
+                "voxtral-mini-tts-2603"
+            ),
             reference
         );
         assert_ne!(
-            hash_voix("Bonjour le monde.", "en", "default", "voxtral-mini-tts-2603"),
+            hash_voix(
+                "Bonjour le monde.",
+                "en",
+                "default",
+                "voxtral-mini-tts-2603"
+            ),
             reference
         );
         assert_ne!(

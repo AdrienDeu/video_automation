@@ -15,10 +15,15 @@ use video_core::projet::{DecisionValidation, Projet};
 /// Nombre maximal d'appels modele par scene (appel d'outil + cloture).
 const TOURS_MAX_PAR_SCENE: u32 = 4;
 
-/// Nombre maximal de tentatives de la boucle agent/outil par scene : le
-/// modele emet parfois un nom d'outil malforme (ex. `fasterxmlchoisir_image`),
-/// erreur transitoire qu'une nouvelle tentative resout.
-const TENTATIVES_MAX_PAR_SCENE: u32 = 3;
+/// Nombre maximal de tentatives de la boucle agent/outil par scene : couvre
+/// les erreurs transitoires cote LLM — nom d'outil malforme (ex.
+/// `fasterxmlchoisir_image`) et rate-limit (429).
+const TENTATIVES_MAX_PAR_SCENE: u32 = 5;
+
+/// Pause initiale avant de rejouer une requete rate-limitee (429) : elle
+/// double a chaque tentative (5 s, 10 s, 20 s, 40 s) pour laisser la fenetre
+/// de quota se rouvrir.
+const PAUSE_RATE_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Fait passer un projet de `ScenarioGenere` (scenario accepte) a
 /// `VisuelsPrets` : une image licenciee est choisie pour chaque scene.
@@ -124,16 +129,17 @@ pub async fn produire_visuels_avec_consigne<M: CompletionModel + 'static>(
     Ok(())
 }
 
-/// Lance la boucle agent/outil d'une scene, avec nouvelle tentative quand le
-/// modele appelle un outil inconnu : un nom malforme (ex.
-/// `fasterxmlchoisir_image`) est une erreur transitoire cote LLM, que rejouer
-/// la meme consigne resout en general. Les autres erreurs (reseau, quota,
-/// outil en echec) remontent sans reessai.
+/// Lance la boucle agent/outil d'une scene, avec nouvelles tentatives sur les
+/// erreurs transitoires cote LLM : un nom d'outil malforme (ex.
+/// `fasterxmlchoisir_image`) est rejoue immediatement, un rate-limit (429)
+/// apres une pause exponentielle qui laisse le quota se rouvrir. Les autres
+/// erreurs (reseau, outil en echec) remontent sans reessai.
 async fn prompter_avec_nouvelles_tentatives<M: CompletionModel + 'static>(
     agent: &Agent<M>,
     consigne: &str,
 ) -> Result<String, llm::PromptError> {
     let mut tentative = 0;
+    let mut pause = PAUSE_RATE_LIMIT;
     loop {
         tentative += 1;
         match agent
@@ -144,6 +150,12 @@ async fn prompter_avec_nouvelles_tentatives<M: CompletionModel + 'static>(
             Ok(reponse) => return Ok(reponse),
             Err(erreur)
                 if tentative < TENTATIVES_MAX_PAR_SCENE && est_outil_inconnu(&erreur) => {}
+            Err(erreur)
+                if tentative < TENTATIVES_MAX_PAR_SCENE && est_rate_limit(&erreur) =>
+            {
+                tokio::time::sleep(pause).await;
+                pause *= 2;
+            }
             Err(erreur) => return Err(erreur),
         }
     }
@@ -153,6 +165,12 @@ async fn prompter_avec_nouvelles_tentatives<M: CompletionModel + 'static>(
 /// le message de rig (le nom malforme varie, le message est stable).
 fn est_outil_inconnu(erreur: &impl std::fmt::Display) -> bool {
     erreur.to_string().contains("unknown or disallowed tool")
+}
+
+/// Detecte un rate-limit (HTTP 429) dans le message d'erreur : erreur
+/// transitoire, le quota se rouvre apres une pause.
+fn est_rate_limit(erreur: &impl std::fmt::Display) -> bool {
+    erreur.to_string().contains("429")
 }
 
 /// Construit l'agent Visuel et son outil depuis la configuration du projet,
@@ -275,11 +293,14 @@ mod tests {
     use video_core::scenario::{Scenario, Scene};
 
     /// Mock de `CompletionModel` : reponses predefinies consommees dans
-    /// l'ordre (meme principe que `llm/tests/hello_world.rs`). Les requetes
-    /// recues sont capturees (format debug) pour verifier les consignes.
+    /// l'ordre (meme principe que `llm/tests/hello_world.rs`). Les erreurs
+    /// scriptees sont levees en priorite (une par appel), pour simuler les
+    /// erreurs transitoires du provider. Les requetes recues sont capturees
+    /// (format debug) pour verifier les consignes.
     #[derive(Clone, Default)]
     struct ModeleFactice {
         reponses: Arc<Mutex<VecDeque<CompletionResponse<serde_json::Value>>>>,
+        erreurs: Arc<Mutex<VecDeque<CompletionError>>>,
         requetes: Arc<Mutex<Vec<String>>>,
     }
 
@@ -300,6 +321,14 @@ mod tests {
                 .lock()
                 .expect("mutex non empoisonne")
                 .push(format!("{_request:?}"));
+            if let Some(erreur) = self
+                .erreurs
+                .lock()
+                .expect("mutex non empoisonne")
+                .pop_front()
+            {
+                return Err(erreur);
+            }
             self.reponses
                 .lock()
                 .expect("mutex non empoisonne")
@@ -444,6 +473,7 @@ mod tests {
         let agent = AgentBuilder::new(ModeleFactice {
             reponses: Arc::new(Mutex::new(reponses)),
             requetes: Arc::new(Mutex::new(vec![])),
+            ..Default::default()
         })
         .tool(ChoisirImageFactice {
             choisies: choisies.clone(),
@@ -467,6 +497,7 @@ mod tests {
         let agent = AgentBuilder::new(ModeleFactice {
             reponses: Arc::new(Mutex::new(reponses)),
             requetes: requetes.clone(),
+            ..Default::default()
         })
         .tool(ChoisirImageFactice {
             choisies: choisies.clone(),
@@ -574,6 +605,7 @@ mod tests {
         let agent = AgentBuilder::new(ModeleFactice {
             reponses: Arc::new(Mutex::new(reponses)),
             requetes: Arc::new(Mutex::new(vec![])),
+            ..Default::default()
         })
         .tool(ChoisirImageFactice {
             choisies: choisies.clone(),
@@ -610,6 +642,7 @@ mod tests {
         let agent = AgentBuilder::new(ModeleFactice {
             reponses: Arc::new(Mutex::new(reponses)),
             requetes: Arc::new(Mutex::new(vec![])),
+            ..Default::default()
         })
         .tool(ChoisirImageFactice {
             choisies: choisies.clone(),
@@ -646,6 +679,7 @@ mod tests {
         let agent = AgentBuilder::new(ModeleFactice {
             reponses: Arc::new(Mutex::new(reponses)),
             requetes: Arc::new(Mutex::new(vec![])),
+            ..Default::default()
         })
         .tool(ChoisirImageFactice {
             choisies: choisies.clone(),
@@ -668,9 +702,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn echoue_apres_trois_noms_d_outil_malformes() {
+    async fn reessaie_apres_un_rate_limit() {
+        let mut projet = projet_scenario_accepte(1);
+        // Premiere tentative : le provider rate-limite (429) ; apres la pause,
+        // la seconde tentative aboutit.
+        let erreurs = VecDeque::from(vec![CompletionError::ProviderError(
+            "HttpError: Invalid status code 429 Too Many Requests".to_string(),
+        )]);
+        let reponses = VecDeque::from(vec![reponse_appel_outil(0), reponse_texte()]);
+        let choisies: ImagesChoisies = Arc::new(Mutex::new(vec![]));
+        let agent = AgentBuilder::new(ModeleFactice {
+            reponses: Arc::new(Mutex::new(reponses)),
+            erreurs: Arc::new(Mutex::new(erreurs)),
+            requetes: Arc::new(Mutex::new(vec![])),
+        })
+        .tool(ChoisirImageFactice {
+            choisies: choisies.clone(),
+        })
+        .build();
+
+        produire_visuels(
+            &mut projet,
+            &agent,
+            &choisies,
+            ModeTransition::Validation,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("la production doit aboutir apres la pause rate-limit");
+
+        assert_eq!(projet.etat, EtatPipeline::VisuelsPrets);
+        assert_eq!(projet.visuels.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn echoue_apres_cinq_noms_d_outil_malformes() {
         let mut projet = projet_scenario_accepte(1);
         let reponses = VecDeque::from(vec![
+            reponse_appel_outil_inconnu(),
+            reponse_appel_outil_inconnu(),
             reponse_appel_outil_inconnu(),
             reponse_appel_outil_inconnu(),
             reponse_appel_outil_inconnu(),
@@ -679,6 +749,7 @@ mod tests {
         let agent = AgentBuilder::new(ModeleFactice {
             reponses: Arc::new(Mutex::new(reponses)),
             requetes: Arc::new(Mutex::new(vec![])),
+            ..Default::default()
         })
         .tool(ChoisirImageFactice {
             choisies: choisies.clone(),

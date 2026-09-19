@@ -1,60 +1,17 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="fr">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Studio video</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%236e8bff'/%3E%3Cstop offset='1' stop-color='%239d6eff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='24' height='24' rx='6' fill='url(%23g)'/%3E%3Cpath d='M9 6.6v10.8a1 1 0 0 0 1.53.85l8.55-5.4a1 1 0 0 0 0-1.7l-8.55-5.4A1 1 0 0 0 9 6.6z' fill='white'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/style.css">
-</head>
-<body>
-  <header>
-    <div class="header-contenu">
-      <div class="logo" aria-hidden="true">
-        <svg viewBox="0 0 24 24"><path d="M8 5.5v13a1 1 0 0 0 1.53.85l10.2-6.5a1 1 0 0 0 0-1.7L9.53 4.65A1 1 0 0 0 8 5.5z"/></svg>
-      </div>
-      <div>
-        <h1>Studio video</h1>
-        <p class="sous-titre">De la dictee a la video educative</p>
-      </div>
-    </div>
-  </header>
-  <main>
-    <section id="zone-upload" class="carte">
-      <h2>Nouveau projet</h2>
-      <form id="form-upload">
-        <label>
-          Fichier audio
-          <input type="file" id="champ-audio" name="audio" accept="audio/*" required>
-        </label>
-        <label>
-          Langue (optionnel, ex. fr)
-          <input type="text" id="champ-langue" name="langue" maxlength="12" placeholder="fr">
-        </label>
-        <button type="submit" id="bouton-upload">Envoyer</button>
-      </form>
-      <p id="statut-upload" class="statut" hidden></p>
-    </section>
-
-    <section id="zone-liste" class="carte">
-      <h2>Projets</h2>
-      <ul id="liste-projets"></ul>
-      <p id="liste-vide" class="statut" hidden>Aucun projet pour le moment.</p>
-    </section>
-
-    <section id="zone-detail" class="carte" hidden>
-      <h2 id="detail-titre">Detail du projet</h2>
-      <div id="detail-etapes"></div>
-      <div id="detail-etat"></div>
-      <div id="detail-transcription"></div>
-      <div id="detail-scenario"></div>
-      <div id="detail-visuels"></div>
-      <div id="detail-voix"></div>
-      <div id="detail-montage"></div>
-      <div id="detail-publication"></div>
-      <div id="detail-validation"></div>
-    </section>
-  </main>
-  <script src="/app.js"></script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Studio vidéo</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%23c93e09'/%3E%3Cpath d='M9 6.6v10.8a1 1 0 0 0 1.53.85l8.55-5.4a1 1 0 0 0 0-1.7l-8.55-5.4A1 1 0 0 0 9 6.6z' fill='white'/%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <div id="racine"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
 </html>

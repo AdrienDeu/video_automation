@@ -1630,7 +1630,12 @@ mod tests {
             .expect("lecture du corps")
             .to_bytes();
         let html = String::from_utf8(html.to_vec()).expect("html en utf-8");
-        assert!(html.contains("zone-upload"));
+        // L'interface est une application React : la page servie n'est qu'une
+        // coquille, son point de montage et les deux fichiers construits par
+        // Vite. Tout le balisage est rendu cote client.
+        assert!(html.contains(r#"id="racine""#), "{html}");
+        assert!(html.contains("/app.js"), "{html}");
+        assert!(html.contains("/style.css"), "{html}");
 
         let reponse = app
             .clone()

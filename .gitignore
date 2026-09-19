@@ -2,3 +2,7 @@
 .env
 /data/*
 !/data/.gitkeep
+# Interface web : dependances et sortie de build de Vite (regenerees par
+# `npm ci && npm run build` dans apps/server/ui).
+/apps/server/ui/node_modules
+/apps/server/ui/dist

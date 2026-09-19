@@ -33,6 +33,28 @@ Chaque étape (4 à 9 du cahier des charges) est configurable :
 **automatique** ou **en attente de validation**, avec possibilité d'affiner le
 résultat d'un agent via un prompt dédié avant de continuer.
 
+## Construction
+
+L'interface web est une application React (TypeScript, Vite) dont la sortie de
+build est **embarquée dans le binaire** par `include_str!`. Elle doit donc être
+construite avant toute commande cargo ; `apps/server/build.rs` le rappelle si
+`ui/dist/` manque.
+
+```sh
+(cd apps/server/ui && npm ci && npm run build)   # interface -> ui/dist/
+cargo build --workspace
+cargo run -p server                              # http://127.0.0.1:8080
+```
+
+Pendant le développement de l'interface, `npm run dev` sert le front avec
+rechargement à chaud et relaie les appels API au serveur Rust (à lancer à côté).
+
+Les composants, couleurs, typographie et espacements viennent du design system
+« Video Automation » : ses fichiers sont copiés tels quels dans
+`apps/server/ui/src/vendor/` et ne sont pas édités sur place — ils sont
+re-synchronisés depuis le système. `tokens.css` est dérivé de `tokens.json` au
+build par `scripts/tokens-to-css.mjs`.
+
 ## Index des documents
 
 | Document | Contenu |
@@ -46,5 +68,6 @@ résultat d'un agent via un prompt dédié avant de continuer.
 - **Traitement** : STT → scénario → visuels libres de droits → voix off
   multilingue → montage ffmpeg → sous-titres.
 - **Sortie** : vidéo publiée sur YouTube via la Data API v3.
-- **Plateforme** : Linux, 100 % Rust, LLM via API (Mistral) ou LLM local sur
-  serveur GPU (Ollama / vLLM) sans changement de code des agents.
+- **Plateforme** : Linux. Pipeline et serveur en Rust ; interface web en React
+  (TypeScript), embarquée dans le binaire. LLM via API (Mistral) ou LLM local
+  sur serveur GPU (Ollama / vLLM) sans changement de code des agents.

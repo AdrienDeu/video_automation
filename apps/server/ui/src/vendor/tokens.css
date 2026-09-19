@@ -1,0 +1,116 @@
+/* Genere par scripts/tokens-to-css.mjs depuis src/vendor/tokens.json.
+   Design system « Video Automation » version 1. Ne pas editer. */
+
+:root {
+  --surface: #ffffff;
+  --surface-raised: #f6f6f8;
+  --surface-sunken: #edeef1;
+  --line: #e3e4e8;
+  --line-strong: #c7c9d1;
+  --ink: #17181c;
+  --ink-muted: #6b6e76;
+  --ink-faint: #a3a6ad;
+  --accent: #c93e09;
+  --accent-soft: #fbe4d8;
+  --on-accent: #ffffff;
+  --success: #1c7a43;
+  --success-soft: #dff3e6;
+  --on-success: #ffffff;
+  --warning: #93590a;
+  --warning-soft: #faedd2;
+  --on-warning: #ffffff;
+  --danger: #c1272d;
+  --danger-soft: #fbe1e2;
+  --on-danger: #ffffff;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --text-display-lg-size: 40px;
+  --text-display-lg-line: 44px;
+  --text-display-lg-weight: 600;
+  --text-display-sm-size: 28px;
+  --text-display-sm-line: 34px;
+  --text-display-sm-weight: 600;
+  --text-body-lg-size: 17px;
+  --text-body-lg-line: 26px;
+  --text-body-lg-weight: 400;
+  --text-body-size: 15px;
+  --text-body-line: 22px;
+  --text-body-weight: 400;
+  --text-body-sm-size: 13px;
+  --text-body-sm-line: 18px;
+  --text-body-sm-weight: 400;
+  --text-label-size: 13px;
+  --text-label-line: 16px;
+  --text-label-weight: 600;
+  --text-label-spacing: 0.01em;
+  --text-label-caps-size: 11px;
+  --text-label-caps-line: 14px;
+  --text-label-caps-weight: 700;
+  --text-label-caps-spacing: 0.06em;
+  --text-mono-size: 13px;
+  --text-mono-line: 20px;
+  --text-mono-weight: 400;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-full: 999px;
+  --shadow-sm: 0 1px 2px rgba(15,15,20,0.06), 0 1px 1px rgba(15,15,20,0.04);
+  --shadow-md: 0 8px 24px rgba(15,15,20,0.14);
+  --focus-ring: 0 0 0 3px rgba(201,62,9,0.35);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --surface: #121214;
+    --surface-raised: #1b1b1f;
+    --surface-sunken: #0b0b0d;
+    --line: #2a2b30;
+    --line-strong: #3d3e45;
+    --ink: #f3f3f5;
+    --ink-muted: #9a9ca6;
+    --ink-faint: #5c5e66;
+    --accent: #ff7a45;
+    --accent-soft: #3a2013;
+    --on-accent: #231005;
+    --success: #4ade80;
+    --success-soft: #123420;
+    --on-success: #062910;
+    --warning: #fbbf24;
+    --warning-soft: #3a2b06;
+    --on-warning: #241a02;
+    --danger: #ff6b6b;
+    --danger-soft: #3a1414;
+    --on-danger: #2b0a0a;
+  }
+}
+
+:root[data-theme="dark"] {
+  --surface: #121214;
+  --surface-raised: #1b1b1f;
+  --surface-sunken: #0b0b0d;
+  --line: #2a2b30;
+  --line-strong: #3d3e45;
+  --ink: #f3f3f5;
+  --ink-muted: #9a9ca6;
+  --ink-faint: #5c5e66;
+  --accent: #ff7a45;
+  --accent-soft: #3a2013;
+  --on-accent: #231005;
+  --success: #4ade80;
+  --success-soft: #123420;
+  --on-success: #062910;
+  --warning: #fbbf24;
+  --warning-soft: #3a2b06;
+  --on-warning: #241a02;
+  --danger: #ff6b6b;
+  --danger-soft: #3a1414;
+  --on-danger: #2b0a0a;
+}

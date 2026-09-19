@@ -1,0 +1,440 @@
+/* Mise en page de l'application. Les composants (boutons, champs, badges,
+   cartes, alertes, barres de progression) et toutes les valeurs viennent du
+   design system : `vendor/tokens.css` et `vendor/ds-bundle.css`. On n'ecrit
+   ici que la structure et ce qu'aucun composant ne couvre. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line);
+  font-weight: var(--text-body-weight);
+}
+
+a {
+  color: var(--accent);
+}
+
+a:focus-visible,
+button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-mono-size);
+  color: var(--ink-muted);
+}
+
+/* --- Entete --------------------------------------------------------------- */
+
+.entete {
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+
+.entete-contenu {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: var(--space-5) var(--space-4);
+}
+
+.entete h1 {
+  margin: 0;
+  font-size: var(--text-display-sm-size);
+  line-height: var(--text-display-sm-line);
+  font-weight: var(--text-display-sm-weight);
+}
+
+.accroche {
+  margin: var(--space-1) 0 0;
+  color: var(--ink-muted);
+  font-size: var(--text-body-sm-size);
+  line-height: var(--text-body-sm-line);
+}
+
+/* --- Grille de page ------------------------------------------------------- */
+
+.page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-4) var(--space-8);
+  display: grid;
+  grid-template-columns: minmax(0, 340px) minmax(0, 1fr);
+  gap: var(--space-6);
+  align-items: start;
+}
+
+.colonne-laterale,
+.colonne-principale,
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .page {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.carte-titre {
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-body-lg-size);
+  line-height: var(--text-body-lg-line);
+  font-weight: 600;
+}
+
+.vide {
+  margin: 0;
+  color: var(--ink-muted);
+}
+
+.vide-page {
+  padding: var(--space-7) var(--space-5);
+  text-align: center;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-lg);
+}
+
+/* --- Formulaire d'envoi --------------------------------------------------- */
+
+.formulaire {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.formulaire-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Un champ fichier ne tient pas dans la hauteur fixe d'un champ texte. */
+.va-input-fichier {
+  height: auto;
+  padding: var(--space-2) var(--space-3);
+}
+
+/* --- Liste des projets ---------------------------------------------------- */
+
+.liste-projets {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.ligne-projet {
+  width: 100%;
+  display: grid;
+  /* Le badge porte le sens : il garde sa largeur naturelle. C'est la date,
+     accessoire, qui absorbe le manque de place et se tronque. */
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ligne-projet:hover {
+  background: var(--surface-sunken);
+}
+
+.ligne-projet-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.ligne-projet-id {
+  font-family: var(--font-mono);
+  font-size: var(--text-mono-size);
+}
+
+/* Le badge occupe la colonne souple : sans cela il s'etire sur toute sa
+   largeur et se lit comme une barre coloree, pas comme une etiquette. */
+.ligne-projet .va-badge {
+  justify-self: start;
+}
+
+.ligne-projet-date {
+  /* `text-align` et non `justify-self` : ce dernier dimensionne l'element sur
+     son contenu, la colonne cesse alors de le borner et l'ellipse ne joue
+     jamais. Etire, il remplit sa colonne et se tronque. */
+  text-align: right;
+  color: var(--ink-muted);
+  font-size: var(--text-body-sm-size);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 480px) {
+  .ligne-projet-date {
+    display: none;
+  }
+}
+
+/* --- Detail : entete et avancement ---------------------------------------- */
+
+.detail-entete {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.detail-entete .carte-titre {
+  margin: 0;
+}
+
+.progression {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: var(--space-4) 0;
+}
+
+.etapes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-5);
+}
+
+.etape {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--ink-faint);
+  font-size: var(--text-body-sm-size);
+}
+
+.etape-point {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: currentColor;
+  flex: none;
+}
+
+.etape-faite {
+  color: var(--success);
+}
+
+.etape-active {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* --- Sections du detail --------------------------------------------------- */
+
+.section + .section {
+  margin-top: var(--space-6);
+  padding-top: var(--space-6);
+  border-top: 1px solid var(--line);
+}
+
+.section-titre {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-label-size);
+  line-height: var(--text-label-line);
+  font-weight: var(--text-label-weight);
+  letter-spacing: var(--text-label-caps-spacing);
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+
+.meta {
+  margin: var(--space-1) 0;
+  color: var(--ink-muted);
+  font-size: var(--text-body-sm-size);
+}
+
+.transcription {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+/* --- Scenario ------------------------------------------------------------- */
+
+.scenario-titre {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-body-lg-size);
+  font-weight: 600;
+}
+
+.scenes {
+  list-style: none;
+  margin: var(--space-4) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  counter-reset: scene;
+}
+
+.scene {
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.scene-titre {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-label-size);
+  font-weight: 600;
+}
+
+.scene-narration {
+  margin: 0;
+}
+
+.scene-dialogue {
+  margin: var(--space-2) 0 0;
+}
+
+/* --- Visuels -------------------------------------------------------------- */
+
+.galerie {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-4);
+}
+
+.visuel {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.visuel img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+}
+
+.visuel figcaption {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.visuel-titre {
+  font-size: var(--text-body-sm-size);
+  font-weight: 600;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.visuel-attribution {
+  font-size: var(--text-body-sm-size);
+  line-height: var(--text-body-sm-line);
+  color: var(--ink-muted);
+}
+
+/* --- Voix, montage, telechargements --------------------------------------- */
+
+.voix {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.voix-meta {
+  font-size: var(--text-body-sm-size);
+}
+
+.voix audio {
+  height: 36px;
+  max-width: 100%;
+}
+
+.lecteur {
+  width: 100%;
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+}
+
+.telechargement {
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-body-sm-size);
+}
+
+/* --- Affinage et decisions ------------------------------------------------ */
+
+.affinage {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+.affinage .va-input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Dans une carte de galerie (220px), champ et bouton ne tiennent pas cote a
+   cote : on les empile. */
+.affinage-compact {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-top: var(--space-3);
+}
+
+.actions-secondaires {
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--line);
+}
+
+.decision .va-alert {
+  margin-top: var(--space-4);
+}
+
+.detail .va-alert {
+  margin-top: var(--space-4);
+}

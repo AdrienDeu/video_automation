@@ -1,0 +1,65 @@
+body { margin: 0; }
+
+.va-row { display: flex; gap: var(--space-3); align-items: center; padding: var(--space-4); flex-wrap: wrap; }
+.va-col { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-4); }
+
+.va-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: filter .15s ease, background-color .15s ease, border-color .15s ease;
+}
+.va-btn-md { height: 36px; padding: 0 var(--space-4); }
+.va-btn-sm { height: 28px; padding: 0 var(--space-3); font-size: 12px; }
+.va-btn-primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.va-btn-primary:hover { filter: brightness(0.94); }
+.va-btn-secondary { background: var(--surface-raised); border-color: var(--line-strong); color: var(--ink); }
+.va-btn-secondary:hover { background: var(--surface-sunken); }
+.va-btn-ghost { background: transparent; border-color: transparent; color: var(--ink); }
+.va-btn-ghost:hover { background: var(--surface-raised); }
+.va-btn-danger { background: var(--danger); border-color: var(--danger); color: var(--on-danger); }
+.va-btn:disabled { opacity: .5; cursor: not-allowed; }
+.va-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+.va-field { display: flex; flex-direction: column; gap: var(--space-1); font-family: var(--font-sans); }
+.va-input-label { font-size: 13px; font-weight: 600; color: var(--ink); }
+.va-input { font: inherit; font-size: 14px; height: 36px; padding: 0 var(--space-3); border-radius: var(--radius-md); border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); box-sizing: border-box; width: 100%; }
+.va-input::placeholder { color: var(--ink-faint); }
+.va-input:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
+.va-input-error { border-color: var(--danger); }
+.va-input-helper { margin: 0; font-size: 12px; color: var(--ink-muted); }
+.va-input-helper-error { color: var(--danger); }
+
+.va-badge { display: inline-flex; align-items: center; height: 20px; padding: 0 var(--space-2); border-radius: var(--radius-sm); font-family: var(--font-sans); font-size: 12px; font-weight: 600; white-space: nowrap; }
+.va-badge-neutral { background: var(--surface-sunken); color: var(--ink-muted); }
+.va-badge-accent { background: var(--accent-soft); color: var(--accent); }
+.va-badge-success { background: var(--success-soft); color: var(--success); }
+.va-badge-warning { background: var(--warning-soft); color: var(--warning); }
+.va-badge-danger { background: var(--danger-soft); color: var(--danger); }
+
+.va-card { background: var(--surface-raised); border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); }
+.va-card-padded { padding: var(--space-5); }
+
+.va-alert { display: flex; flex-direction: column; gap: var(--space-1); padding: var(--space-4); border-radius: var(--radius-md); border-left: 3px solid; font-family: var(--font-sans); }
+.va-alert-title { margin: 0; font-size: 14px; font-weight: 600; }
+.va-alert-body { font-size: 13px; line-height: 20px; }
+.va-alert-info { background: var(--surface-raised); border-color: var(--line-strong); color: var(--ink); }
+.va-alert-success { background: var(--success-soft); border-color: var(--success); color: var(--ink); }
+.va-alert-warning { background: var(--warning-soft); border-color: var(--warning); color: var(--ink); }
+.va-alert-danger { background: var(--danger-soft); border-color: var(--danger); color: var(--ink); }
+
+.va-progress { display: flex; flex-direction: column; gap: var(--space-2); font-family: var(--font-sans); }
+.va-progress-label { display: flex; justify-content: space-between; font-size: 12px; font-weight: 600; color: var(--ink-muted); }
+.va-progress-value { font-family: var(--font-mono); color: var(--ink); }
+.va-progress-track { height: 8px; border-radius: var(--radius-full); background: var(--surface-sunken); overflow: hidden; }
+.va-progress-fill { height: 100%; border-radius: var(--radius-full); background: var(--accent); transition: width .2s ease; }
+.va-progress-indeterminate { width: 40%; animation: va-progress-slide 1.2s ease-in-out infinite; }
+@keyframes va-progress-slide { 0% { margin-left: -40%; } 100% { margin-left: 100%; } }

@@ -43,14 +43,19 @@ const MOTS_VIDES: &[&str] = &[
 /// alphabetiques d'au moins 4 caracteres, hors mots vides, tries par longueur
 /// decroissante (les plus specifiques d'abord), en minuscules et sans doublon.
 pub fn mots_cles(description: &str, n: usize) -> Vec<String> {
+    // Le dedoublonnage precede le tri : `Vec::dedup` ne supprime que les
+    // doublons adjacents, or deux occurrences d'un meme mot peuvent etre
+    // separees par un autre mot de meme longueur (le tri par longueur est
+    // stable). Un mot-cle gaspille appauvrit la requete de repli.
+    let mut vus = std::collections::HashSet::new();
     let mut mots: Vec<String> = description
         .split(|c: char| !c.is_alphabetic())
         .filter(|m| m.len() >= 4)
         .map(str::to_lowercase)
         .filter(|m| !MOTS_VIDES.contains(&m.as_str()))
+        .filter(|m| vus.insert(m.clone()))
         .collect();
     mots.sort_by_key(|m| std::cmp::Reverse(m.len()));
-    mots.dedup();
     mots.truncate(n);
     mots
 }
@@ -521,12 +526,24 @@ mod tests {
         assert!(!cles
             .iter()
             .any(|m| m == "trois" || m == "sont" || m == "aux"));
-        let mut sans_doublon = cles.clone();
-        sans_doublon.dedup();
-        assert_eq!(cles, sans_doublon);
+        let uniques: std::collections::HashSet<&String> = cles.iter().collect();
+        assert_eq!(uniques.len(), cles.len(), "mots-cles en double : {cles:?}");
 
         // Description vide : aucun mot-cle, pas de panique.
         assert!(mots_cles("", 4).is_empty());
+    }
+
+    /// Garde-fou anti-regression : deux occurrences d'un meme mot separees par
+    /// un mot de meme longueur restent non adjacentes apres le tri stable par
+    /// longueur, donc invisibles pour `Vec::dedup`.
+    #[test]
+    fn dedoublonne_meme_a_distance_apres_le_tri() {
+        assert_eq!(mots_cles("arbre plage arbre", 4), vec!["arbre", "plage"]);
+        // Le mot conserve garde sa premiere position a longueur egale.
+        assert_eq!(
+            mots_cles("plage arbre plage colline", 4),
+            vec!["colline", "plage", "arbre"]
+        );
     }
 
     #[test]

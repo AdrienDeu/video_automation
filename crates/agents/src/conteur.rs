@@ -277,13 +277,15 @@ mod tests {
         // Mode validation : la decision humaine reste attendue.
         assert_eq!(projet.validation_voix, None);
 
-        // Le .srt est ecrit et synchronise sur les durees (cibles ici).
+        // Le .srt est ecrit et synchronise sur les durees (cibles ici), sur la
+        // timeline du montage : la scene 0 (8 s) cede DUREE_FONDU au fondu
+        // enchaine, la scene 1 demarre donc a 7,5 s et non a 8 s.
         assert_eq!(projet.sous_titres, vec!["sous-titres-fr.srt".to_string()]);
         let srt = std::fs::read_to_string(temp.path().join("abc123").join("sous-titres-fr.srt"))
             .expect("le .srt est ecrit");
         assert!(srt.starts_with("1\n00:00:00,000 --> "), "{srt}");
         assert!(
-            srt.contains("00:00:08,000 --> 00:00:12,000\nFin de la video."),
+            srt.contains("00:00:07,500 --> 00:00:11,500\nFin de la video."),
             "{srt}"
         );
     }
